@@ -48,6 +48,19 @@
               加载更多历史消息
             </a-button>
           </div>
+
+          <!-- 队列状态提示 -->
+          <div v-if="queuePosition > 0" class="queue-status-alert">
+            <a-alert type="info" show-icon>
+              <template #message>
+                <div class="queue-status-content">
+                  <span>⏳ 当前任务排队中，前面还有 {{ queuePosition }} 个任务</span>
+                  <a-button type="link" size="small" danger @click="cancelCurrentTask">取消任务</a-button>
+                </div>
+              </template>
+            </a-alert>
+          </div>
+
           <div v-for="(message, index) in messages" :key="index" class="message-item">
             <div v-if="message.type === 'user'" class="user-message">
               <div class="message-content">{{ message.content }}</div>
@@ -222,6 +235,13 @@ import {
 import { listAppChatHistory } from '@/api/chatHistoryController'
 import { CodeGenTypeEnum, formatCodeGenType } from '@/utils/codeGenTypes'
 import request from '@/request'
+import {
+  createGenTask,
+  cancelTask,
+  GenTaskStatus,
+  ReconnectableSseClient,
+  type GenTaskVO,
+} from '@/api/genTaskClient'
 
 import MarkdownRenderer from '@/components/MarkdownRenderer.vue'
 import AppDetailModal from '@/components/AppDetailModal.vue'
@@ -260,6 +280,11 @@ const userInput = ref('')
 const isGenerating = ref(false)
 const messagesContainer = ref<HTMLElement>()
 
+// 任务队列相关
+const currentTask = ref<GenTaskVO | null>(null)
+const queuePosition = ref<number>(-1)
+const sseClient = ref<ReconnectableSseClient | null>(null)
+
 // 对话历史相关
 const loadingHistory = ref(false)
 const hasMoreHistory = ref(false)
@@ -289,6 +314,10 @@ const visualEditor = new VisualEditor({
 
 // 权限相关
 const isOwner = computed(() => {
+  // 新建模式下，当前用户就是拥有者
+  if (route.params.id === 'new' || !appId.value) {
+    return true
+  }
   return appInfo.value?.userId === loginUserStore.loginUser.id
 })
 
@@ -361,6 +390,21 @@ const loadMoreHistory = async () => {
 // 获取应用信息
 const fetchAppInfo = async () => {
   const id = route.params.id as string
+  
+  // 如果是新建应用模式（/app/chat/new），不需要获取应用信息
+  if (id === 'new') {
+    appId.value = ''
+    historyLoaded.value = true
+    
+    // 检查是否有初始提示词参数
+    const initPrompt = route.query.prompt as string
+    if (initPrompt) {
+      const decodedPrompt = decodeURIComponent(initPrompt)
+      await sendInitialMessage(decodedPrompt)
+    }
+    return
+  }
+  
   if (!id) {
     message.error('应用ID不存在')
     router.push('/')
@@ -475,110 +519,161 @@ const sendMessage = async () => {
   await generateCode(message, aiMessageIndex)
 }
 
-// 生成代码 - 使用 EventSource 处理流式响应
+// 生成代码 - 使用新的任务队列 + 可重连 SSE 模式
 const generateCode = async (userMessage: string, aiMessageIndex: number) => {
-  let eventSource: EventSource | null = null
-  let streamCompleted = false
-
   try {
-    // 获取 axios 配置的 baseURL
-    const baseURL = request.defaults.baseURL || API_BASE_URL
+    // 1. 创建生成任务（appId 可能为空，首次对话时系统会自动创建应用）
+    const task = await createGenTask(appId.value ? Number(appId.value) : null, userMessage)
+    currentTask.value = task
+    queuePosition.value = task.queuePosition
 
-    // 构建URL参数
-    const params = new URLSearchParams({
-      appId: appId.value || '',
-      message: userMessage,
-    })
-
-    const url = `${baseURL}/app/chat/gen/code?${params}`
-
-    // 创建 EventSource 连接
-    eventSource = new EventSource(url, {
-      withCredentials: true,
-    })
-
-    let fullContent = ''
-
-    // 处理接收到的消息
-    eventSource.onmessage = function (event) {
-      if (streamCompleted) return
-
+    // 如果是首次对话，后端会创建新应用，需要更新 appId 并跳转到新应用页面
+    if (!appId.value || appId.value !== String(task.appId)) {
+      appId.value = String(task.appId)
+      // 更新路由，但不刷新页面
+      router.replace(`/app/chat/${task.appId}`)
+      // 仅获取新创建的应用基本信息，不触发自动对话逻辑
       try {
-        // 解析JSON包装的数据
-        const parsed = JSON.parse(event.data)
-        const content = parsed.d
-
-        // 拼接内容
-        if (content !== undefined && content !== null) {
-          fullContent += content
-          messages.value[aiMessageIndex].content = fullContent
-          messages.value[aiMessageIndex].loading = false
-          scrollToBottom()
+        const res = await getAppVoById({ id: task.appId })
+        if (res.data.code === 0 && res.data.data) {
+          appInfo.value = res.data.data
         }
-      } catch (error) {
-        console.error('解析消息失败:', error)
-        handleError(error, aiMessageIndex)
+      } catch (e) {
+        console.error('获取应用信息失败：', e)
       }
     }
 
-    // 处理done事件
-    eventSource.addEventListener('done', function () {
-      if (streamCompleted) return
+    console.log('[GenTask] 任务已创建:', task)
 
-      streamCompleted = true
-      isGenerating.value = false
-      eventSource?.close()
-
-      // 延迟更新预览，确保后端已完成处理
-      setTimeout(async () => {
-        await fetchAppInfo()
-        updatePreview()
-      }, 1000)
-    })
-
-    // 处理business-error事件（后端限流等错误）
-    eventSource.addEventListener('business-error', function (event: MessageEvent) {
-      if (streamCompleted) return
-
-      try {
-        const errorData = JSON.parse(event.data)
-        console.error('SSE业务错误事件:', errorData)
-
-        // 显示具体的错误信息
-        const errorMessage = errorData.message || '生成过程中出现错误'
-        messages.value[aiMessageIndex].content = `❌ ${errorMessage}`
-        messages.value[aiMessageIndex].loading = false
-        message.error(errorMessage)
-
-        streamCompleted = true
-        isGenerating.value = false
-        eventSource?.close()
-      } catch (parseError) {
-        console.error('解析错误事件失败:', parseError, '原始数据:', event.data)
-        handleError(new Error('服务器返回错误'), aiMessageIndex)
+    // 如果任务在队列中（PENDING 状态），显示排队提示
+    if (task.status === GenTaskStatus.PENDING) {
+      if (task.queuePosition > 0) {
+        messages.value[aiMessageIndex].content = `⏳ 当前排队位置：第 ${task.queuePosition} 位，请稍候...`
+      } else {
+        messages.value[aiMessageIndex].content = `⏳ 任务准备中，即将开始执行...`
       }
-    })
+      messages.value[aiMessageIndex].loading = true
+    }
 
-    // 处理错误
-    eventSource.onerror = function () {
-      if (streamCompleted || !isGenerating.value) return
-      // 检查是否是正常的连接关闭
-      if (eventSource?.readyState === EventSource.CONNECTING) {
-        streamCompleted = true
+    // 2. 建立 SSE 连接
+    sseClient.value = new ReconnectableSseClient(task.id, {
+      autoReconnect: true,
+      maxRetries: 10,
+      retryInterval: 3000,
+
+      // 数据回调
+      onData: (chunk: string) => {
+        // 如果还有排队提示，清除它
+        if (messages.value[aiMessageIndex].content.startsWith('⏳')) {
+          messages.value[aiMessageIndex].content = ''
+        }
+        messages.value[aiMessageIndex].content += chunk
+        messages.value[aiMessageIndex].loading = false
+        scrollToBottom()
+      },
+
+      // 状态变更回调
+      onStatusChange: (status: string, position: number) => {
+        console.log(`[GenTask] 状态变更: ${status}, 队列位置: ${position}`)
+        queuePosition.value = position
+
+        if (status === GenTaskStatus.RUNNING) {
+          // 任务开始执行
+          if (messages.value[aiMessageIndex].content.startsWith('⏳')) {
+            messages.value[aiMessageIndex].content = ''
+          }
+          messages.value[aiMessageIndex].loading = true
+        } else if (status === GenTaskStatus.PENDING && position > 0) {
+          messages.value[aiMessageIndex].content = `⏳ 当前排队位置：第 ${position} 位，请稍候...`
+        }
+      },
+
+      // 队列位置更新回调
+      onQueueUpdate: (position: number) => {
+        queuePosition.value = position
+        if (position > 0 && messages.value[aiMessageIndex].content.startsWith('⏳')) {
+          messages.value[aiMessageIndex].content = `⏳ 当前排队位置：第 ${position} 位，请稍候...`
+        }
+      },
+
+      // 完成回调
+      onComplete: () => {
+        console.log('[GenTask] 任务完成')
         isGenerating.value = false
-        eventSource?.close()
+        currentTask.value = null
+        queuePosition.value = -1
+        messages.value[aiMessageIndex].loading = false
 
+        // 延迟更新预览，确保后端已完成处理
         setTimeout(async () => {
           await fetchAppInfo()
           updatePreview()
         }, 1000)
-      } else {
-        handleError(new Error('SSE连接错误'), aiMessageIndex)
+      },
+
+      // 错误回调
+      onError: (error: string) => {
+        console.error('[GenTask] 任务失败:', error)
+        messages.value[aiMessageIndex].content = `❌ ${error || '生成过程中出现错误，请重试'}`
+        messages.value[aiMessageIndex].loading = false
+        message.error(error || '生成失败，请重试')
+        isGenerating.value = false
+        currentTask.value = null
+        queuePosition.value = -1
+      },
+
+      // 连接打开回调
+      onOpen: () => {
+        console.log('[GenTask] SSE 连接已建立')
+      },
+
+      // 连接关闭回调
+      onClose: () => {
+        console.log('[GenTask] SSE 连接已关闭')
+      },
+    })
+
+    // 开始连接
+    sseClient.value.connect()
+
+  } catch (error: any) {
+    console.error('创建任务失败：', error)
+    const errorMessage = error?.response?.data?.message || error?.message || '创建任务失败'
+    handleError(new Error(errorMessage), aiMessageIndex)
+  }
+}
+
+// 取消当前任务
+const cancelCurrentTask = async () => {
+  if (!currentTask.value) {
+    return
+  }
+
+  try {
+    await cancelTask(currentTask.value.id)
+    message.success('任务已取消')
+
+    // 关闭 SSE 连接
+    if (sseClient.value) {
+      sseClient.value.close()
+      sseClient.value = null
+    }
+
+    // 清理状态
+    isGenerating.value = false
+    currentTask.value = null
+    queuePosition.value = -1
+
+    // 移除最后一条 AI 消息（因为任务被取消了）
+    if (messages.value.length > 0 && messages.value[messages.value.length - 1].type === 'ai') {
+      const lastAiMessage = messages.value[messages.value.length - 1]
+      if (lastAiMessage.loading || lastAiMessage.content.startsWith('⏳')) {
+        messages.value.pop()
       }
     }
-  } catch (error) {
-    console.error('创建 EventSource 失败：', error)
-    handleError(error, aiMessageIndex)
+  } catch (error: any) {
+    console.error('取消任务失败：', error)
+    message.error(error?.response?.data?.message || '取消任务失败')
   }
 }
 
@@ -589,6 +684,8 @@ const handleError = (error: unknown, aiMessageIndex: number) => {
   messages.value[aiMessageIndex].loading = false
   message.error('生成失败，请重试')
   isGenerating.value = false
+  currentTask.value = null
+  queuePosition.value = -1
 }
 
 // 更新预览
@@ -765,7 +862,11 @@ onMounted(() => {
 
 // 清理资源
 onUnmounted(() => {
-  // EventSource 会在组件卸载时自动清理
+  // 关闭 SSE 连接
+  if (sseClient.value) {
+    sseClient.value.close()
+    sseClient.value = null
+  }
 })
 </script>
 
@@ -833,6 +934,18 @@ onUnmounted(() => {
   padding: 16px;
   overflow-y: auto;
   scroll-behavior: smooth;
+}
+
+/* 队列状态提示 */
+.queue-status-alert {
+  margin-bottom: 16px;
+}
+
+.queue-status-content {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
 }
 
 .message-item {

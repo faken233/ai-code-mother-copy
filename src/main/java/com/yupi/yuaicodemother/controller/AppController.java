@@ -56,6 +56,22 @@ public class AppController {
     @Resource
     private ProjectDownloadService projectDownloadService;
 
+    /**
+     * 通过对话生成代码（SSE 流式返回）
+     * <p>
+     * 【已弃用】推荐使用新的任务队列接口：
+     * 1. POST /gen-task/create - 创建生成任务
+     * 2. GET /gen-task/stream/{taskId} - 连接 SSE 流（支持断线重连）
+     * 3. GET /gen-task/status/{taskId} - 获取任务状态
+     * <p>
+     * 新接口支持：任务排队、断线重连、队列位置实时更新等功能
+     *
+     * @param appId   应用 ID
+     * @param message 用户消息
+     * @param request 请求
+     * @return SSE 流
+     */
+    @Deprecated
     @GetMapping(value = "/chat/gen/code", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     @RateLimit(limitType = RateLimitType.USER, rate = 5, rateInterval = 60, message = "AI 对话请求过于频繁，请稍后再试")
     public Flux<ServerSentEvent<String>> chatToGenCode(@RequestParam Long appId,

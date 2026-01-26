@@ -3,7 +3,7 @@ import { ref, reactive, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
 import { useLoginUserStore } from '@/stores/loginUser'
-import { addApp, listMyAppVoByPage, listGoodAppVoByPage } from '@/api/appController'
+import { listMyAppVoByPage, listGoodAppVoByPage } from '@/api/appController'
 import { getDeployUrl } from '@/config/env'
 import AppCard from '@/components/AppCard.vue'
 
@@ -37,7 +37,7 @@ const setPrompt = (prompt: string) => {
 
 // 优化提示词功能已移除
 
-// 创建应用
+// 创建应用 - 直接跳转到聊天页面，首次对话时会自动创建应用
 const createApp = async () => {
   if (!userPrompt.value.trim()) {
     message.warning('请输入应用描述')
@@ -52,21 +52,13 @@ const createApp = async () => {
 
   creating.value = true
   try {
-    const res = await addApp({
-      initPrompt: userPrompt.value.trim(),
-    })
-
-    if (res.data.code === 0 && res.data.data) {
-      message.success('应用创建成功')
-      // 跳转到对话页面，确保ID是字符串类型
-      const appId = String(res.data.data)
-      await router.push(`/app/chat/${appId}`)
-    } else {
-      message.error('创建失败：' + res.data.message)
-    }
+    // 直接跳转到聊天页面，携带初始提示词
+    // 应用会在首次对话时通过 createGenTask 自动创建
+    const initPrompt = encodeURIComponent(userPrompt.value.trim())
+    await router.push(`/app/chat/new?prompt=${initPrompt}`)
   } catch (error) {
-    console.error('创建应用失败：', error)
-    message.error('创建失败，请重试')
+    console.error('跳转失败：', error)
+    message.error('操作失败，请重试')
   } finally {
     creating.value = false
   }
