@@ -102,3 +102,11 @@ management:
   endpoint:
     health:
       show-details: always
+# AI 生成任务队列配置
+gen-task:
+  # 最大并发执行任务数
+  max-concurrent: 3
+  # 轮询任务队列间隔（毫秒）
+  poll-interval: 2000
+  # 任务执行超时时间（分钟）
+  timeout-minutes: 10

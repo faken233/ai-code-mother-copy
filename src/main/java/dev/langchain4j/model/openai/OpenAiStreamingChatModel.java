@@ -205,11 +205,11 @@ public class OpenAiStreamingChatModel implements StreamingChatModel {
                             .name(name)
                             .arguments(partialArguments)
                             .build();
-                    try {
-                        handler.onPartialToolExecutionRequest(index, partialToolExecutionRequest);
-                    } catch (Exception e) {
-                        withLoggingExceptions(() -> handler.onError(e));
-                    }
+//                    try {
+//                        handler.onPartialToolExecutionRequest(index, partialToolExecutionRequest);
+//                    } catch (Exception e) {
+//                        withLoggingExceptions(() -> handler.onError(e));
+//                    }
                 }
             }
         }
