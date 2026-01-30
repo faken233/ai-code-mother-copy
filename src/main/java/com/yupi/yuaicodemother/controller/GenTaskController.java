@@ -160,6 +160,37 @@ public class GenTaskController {
     }
 
     /**
+     * 获取指定应用的活跃任务
+     * 用于页面刷新后恢复正在执行的任务
+     *
+     * @param appId   应用ID
+     * @param request 请求
+     * @return 活跃任务（如果存在）
+     */
+    @GetMapping("/active/{appId}")
+    public BaseResponse<GenTaskVO> getActiveTaskByApp(@PathVariable Long appId, HttpServletRequest request) {
+        // 参数校验
+        ThrowUtils.throwIf(appId == null || appId <= 0, ErrorCode.PARAMS_ERROR, "应用 ID 错误");
+
+        // 获取当前登录用户
+        User loginUser = userService.getLoginUser(request);
+
+        // 获取该应用的活跃任务
+        GenTask task = genTaskService.getActiveTaskByUserAndApp(loginUser.getId(), appId);
+        if (task == null) {
+            return ResultUtils.success(null);
+        }
+
+        // 获取队列位置
+        int queuePosition = genTaskService.getQueuePosition(task.getId());
+
+        // 构建返回对象
+        GenTaskVO taskVO = buildTaskVO(task, queuePosition);
+
+        return ResultUtils.success(taskVO);
+    }
+
+    /**
      * 获取用户的活跃任务列表
      *
      * @param request 请求

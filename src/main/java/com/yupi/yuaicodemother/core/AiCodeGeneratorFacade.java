@@ -8,7 +8,6 @@ import com.yupi.yuaicodemother.ai.model.MultiFileCodeResult;
 import com.yupi.yuaicodemother.ai.model.message.AiResponseMessage;
 import com.yupi.yuaicodemother.ai.model.message.ToolExecutedMessage;
 import com.yupi.yuaicodemother.ai.model.message.ToolRequestMessage;
-import com.yupi.yuaicodemother.constant.AppConstant;
 import com.yupi.yuaicodemother.core.builder.VueProjectBuilder;
 import com.yupi.yuaicodemother.core.parser.CodeParserExecutor;
 import com.yupi.yuaicodemother.core.saver.CodeFileSaverExecutor;
@@ -84,14 +83,17 @@ public class AiCodeGeneratorFacade {
         AiCodeGeneratorService aiCodeGeneratorService = aiCodeGeneratorServiceFactory.getAiCodeGeneratorService(appId, codeGenTypeEnum);
         return switch (codeGenTypeEnum) {
             case HTML -> {
+                log.info("【AI 请求】调用 HTML 代码生成，appId: {}", appId);
                 Flux<String> codeStream = aiCodeGeneratorService.generateHtmlCodeStream(userMessage);
                 yield processCodeStream(codeStream, CodeGenTypeEnum.HTML, appId);
             }
             case MULTI_FILE -> {
+                log.info("【AI 请求】调用 MULTI_FILE 代码生成，appId: {}", appId);
                 Flux<String> codeStream = aiCodeGeneratorService.generateMultiFileCodeStream(userMessage);
                 yield processCodeStream(codeStream, CodeGenTypeEnum.MULTI_FILE, appId);
             }
             case VUE_PROJECT -> {
+                log.info("【AI 请求】调用 VUE_PROJECT 代码生成，appId: {}", appId);
                 TokenStream tokenStream = aiCodeGeneratorService.generateVueProjectCodeStream(appId, userMessage);
                 yield processTokenStream(tokenStream, appId);
             }
@@ -115,18 +117,17 @@ public class AiCodeGeneratorFacade {
                         AiResponseMessage aiResponseMessage = new AiResponseMessage(partialResponse);
                         sink.next(JSONUtil.toJsonStr(aiResponseMessage));
                     })
-//                    .onPartialToolExecutionRequest((index, toolExecutionRequest) -> {
-//                        ToolRequestMessage toolRequestMessage = new ToolRequestMessage(toolExecutionRequest);
-//                        sink.next(JSONUtil.toJsonStr(toolRequestMessage));
-//                    })
+                    .onPartialToolExecutionRequest((index, toolExecutionRequest) -> {
+                        ToolRequestMessage toolRequestMessage = new ToolRequestMessage(toolExecutionRequest);
+                        sink.next(JSONUtil.toJsonStr(toolRequestMessage));
+                    })
                     .onToolExecuted((ToolExecution toolExecution) -> {
                         ToolExecutedMessage toolExecutedMessage = new ToolExecutedMessage(toolExecution);
                         sink.next(JSONUtil.toJsonStr(toolExecutedMessage));
                     })
                     .onCompleteResponse((ChatResponse response) -> {
-                        // 执行 Vue 项目构建（同步执行，确保预览时项目已就绪）
-                        String projectPath = AppConstant.CODE_OUTPUT_ROOT_DIR + "/vue_project_" + appId;
-                        vueProjectBuilder.buildProject(projectPath);
+//                        String projectPath = AppConstant.CODE_OUTPUT_ROOT_DIR + "/vue_project_" + appId;
+//                        vueProjectBuilder.buildProject(projectPath);
                         sink.complete();
                     })
                     .onError((Throwable error) -> {

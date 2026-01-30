@@ -19,10 +19,11 @@ export enum GenTaskStatus {
 
 /**
  * 任务 VO
+ * 注意：id 和 appId 使用 string | number 类型，避免大整数精度丢失
  */
 export interface GenTaskVO {
-  id: number;
-  appId: number;
+  id: string | number;
+  appId: string | number;
   status: string;
   queuePosition: number;
   codeGenType: string;
@@ -76,9 +77,9 @@ export interface SseConnectionConfig {
  * @param appId 应用ID（可选，首次对话时为空，系统会自动创建应用）
  * @param message 用户消息
  */
-export async function createGenTask(appId: number | null | undefined, message: string): Promise<GenTaskVO> {
-  const data: { appId?: number; message: string } = { message };
-  if (appId && appId > 0) {
+export async function createGenTask(appId: string | number | null | undefined, message: string): Promise<GenTaskVO> {
+  const data: { appId?: string | number; message: string } = { message };
+  if (appId) {
     data.appId = appId;
   }
   const response = await request.post('/gen-task/create', data);
@@ -88,7 +89,7 @@ export async function createGenTask(appId: number | null | undefined, message: s
 /**
  * 获取任务状态
  */
-export async function getTaskStatus(taskId: number): Promise<GenTaskVO> {
+export async function getTaskStatus(taskId: string | number): Promise<GenTaskVO> {
   const response = await request.get(`/gen-task/status/${taskId}`);
   return response.data.data;
 }
@@ -96,7 +97,7 @@ export async function getTaskStatus(taskId: number): Promise<GenTaskVO> {
 /**
  * 取消任务
  */
-export async function cancelTask(taskId: number): Promise<boolean> {
+export async function cancelTask(taskId: string | number): Promise<boolean> {
   const response = await request.post(`/gen-task/cancel/${taskId}`);
   return response.data.data;
 }
@@ -110,18 +111,28 @@ export async function getActiveTasks(): Promise<GenTaskVO[]> {
 }
 
 /**
+ * 获取指定应用的活跃任务（用于页面刷新后恢复）
+ * @param appId 应用ID（使用字符串避免精度丢失）
+ */
+export async function getActiveTaskByApp(appId: string | number): Promise<GenTaskVO | null> {
+  const response = await request.get(`/gen-task/active/${appId}`);
+  return response.data.data;
+}
+
+/**
  * 获取任务已生成的内容
  */
-export async function getGeneratedContent(taskId: number): Promise<string> {
+export async function getGeneratedContent(taskId: string | number): Promise<string> {
   const response = await request.get(`/gen-task/content/${taskId}`);
   return response.data.data;
 }
 
 /**
  * 可重连的 SSE 客户端类
+ * 注意：taskId 使用 string | number 类型，避免大整数精度丢失
  */
 export class ReconnectableSseClient {
-  private taskId: number;
+  private taskId: string | number;
   private config: SseConnectionConfig;
   private eventSource: EventSource | null = null;
   private retryCount: number = 0;
@@ -130,7 +141,7 @@ export class ReconnectableSseClient {
   private isManualClose: boolean = false;
   private baseURL: string;
 
-  constructor(taskId: number, config: SseConnectionConfig = {}) {
+  constructor(taskId: string | number, config: SseConnectionConfig = {}) {
     this.taskId = taskId;
     this.config = {
       autoReconnect: true,

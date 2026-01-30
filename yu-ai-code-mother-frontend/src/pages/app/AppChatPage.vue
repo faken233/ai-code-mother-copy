@@ -238,6 +238,8 @@ import request from '@/request'
 import {
   createGenTask,
   cancelTask,
+  getActiveTaskByApp,
+  getGeneratedContent,
   GenTaskStatus,
   ReconnectableSseClient,
   type GenTaskVO,
@@ -523,7 +525,8 @@ const sendMessage = async () => {
 const generateCode = async (userMessage: string, aiMessageIndex: number) => {
   try {
     // 1. 创建生成任务（appId 可能为空，首次对话时系统会自动创建应用）
-    const task = await createGenTask(appId.value ? Number(appId.value) : null, userMessage)
+    // 注意：appId 使用字符串类型，避免大整数精度丢失
+    const task = await createGenTask(appId.value || null, userMessage)
     currentTask.value = task
     queuePosition.value = task.queuePosition
 
@@ -534,7 +537,7 @@ const generateCode = async (userMessage: string, aiMessageIndex: number) => {
       router.replace(`/app/chat/${task.appId}`)
       // 仅获取新创建的应用基本信息，不触发自动对话逻辑
       try {
-        const res = await getAppVoById({ id: task.appId })
+        const res = await getAppVoById({ id: task.appId as unknown as number })
         if (res.data.code === 0 && res.data.data) {
           appInfo.value = res.data.data
         }
@@ -850,9 +853,141 @@ const getInputPlaceholder = () => {
   return '请描述你想生成的网站，越详细效果越好哦'
 }
 
+/**
+ * 恢复正在执行的任务
+ * 用于页面刷新后自动重连 SSE
+ */
+const resumeActiveTask = async () => {
+  // 仅在有 appId 且不是新建模式时检查
+  if (!appId.value || appId.value === 'new') {
+    return
+  }
+
+  try {
+    // 检查该应用是否有活跃任务
+    // 注意：appId 使用字符串类型，避免大整数精度丢失
+    const task = await getActiveTaskByApp(appId.value)
+    if (!task) {
+      return
+    }
+
+    console.log('[GenTask] 发现活跃任务，准备恢复:', task)
+    currentTask.value = task
+    queuePosition.value = task.queuePosition
+
+    // 获取已生成的内容
+    let existingContent = ''
+    try {
+      existingContent = await getGeneratedContent(task.id) || ''
+    } catch (e) {
+      console.warn('[GenTask] 获取已生成内容失败:', e)
+    }
+
+    // 添加 AI 消息占位符（显示已有内容）
+    const aiMessageIndex = messages.value.length
+    if (task.status === GenTaskStatus.PENDING) {
+      // 任务排队中
+      messages.value.push({
+        type: 'ai',
+        content: task.queuePosition > 0
+          ? `⏳ 当前排队位置：第 ${task.queuePosition} 位，请稍候...`
+          : `⏳ 任务准备中，即将开始执行...`,
+        loading: true,
+      })
+    } else {
+      // 任务执行中，显示已有内容
+      messages.value.push({
+        type: 'ai',
+        content: existingContent,
+        loading: true,
+      })
+    }
+
+    isGenerating.value = true
+
+    // 建立 SSE 连接（从已有内容的偏移位置继续）
+    sseClient.value = new ReconnectableSseClient(task.id, {
+      autoReconnect: true,
+      maxRetries: 10,
+      retryInterval: 3000,
+
+      onData: (chunk: string) => {
+        if (messages.value[aiMessageIndex].content.startsWith('⏳')) {
+          messages.value[aiMessageIndex].content = ''
+        }
+        messages.value[aiMessageIndex].content += chunk
+        messages.value[aiMessageIndex].loading = false
+        scrollToBottom()
+      },
+
+      onStatusChange: (status: string, position: number) => {
+        console.log(`[GenTask] 状态变更: ${status}, 队列位置: ${position}`)
+        queuePosition.value = position
+
+        if (status === GenTaskStatus.RUNNING) {
+          if (messages.value[aiMessageIndex].content.startsWith('⏳')) {
+            messages.value[aiMessageIndex].content = existingContent
+          }
+          messages.value[aiMessageIndex].loading = true
+        } else if (status === GenTaskStatus.PENDING && position > 0) {
+          messages.value[aiMessageIndex].content = `⏳ 当前排队位置：第 ${position} 位，请稍候...`
+        }
+      },
+
+      onQueueUpdate: (position: number) => {
+        queuePosition.value = position
+        if (position > 0 && messages.value[aiMessageIndex].content.startsWith('⏳')) {
+          messages.value[aiMessageIndex].content = `⏳ 当前排队位置：第 ${position} 位，请稍候...`
+        }
+      },
+
+      onComplete: () => {
+        console.log('[GenTask] 任务恢复完成')
+        isGenerating.value = false
+        currentTask.value = null
+        queuePosition.value = -1
+        messages.value[aiMessageIndex].loading = false
+
+        setTimeout(async () => {
+          updatePreview()
+        }, 1000)
+      },
+
+      onError: (error: string) => {
+        console.error('[GenTask] 任务恢复失败:', error)
+        messages.value[aiMessageIndex].content = existingContent || `❌ ${error || '恢复失败，请重试'}`
+        messages.value[aiMessageIndex].loading = false
+        isGenerating.value = false
+        currentTask.value = null
+        queuePosition.value = -1
+      },
+
+      onOpen: () => {
+        console.log('[GenTask] SSE 重连成功')
+      },
+
+      onClose: () => {
+        console.log('[GenTask] SSE 连接关闭')
+      },
+    })
+
+    // 从已有内容的偏移位置开始连接
+    sseClient.value.connect(existingContent.length)
+    message.info('检测到正在执行的任务，已自动恢复连接')
+
+  } catch (error) {
+    console.error('[GenTask] 检查活跃任务失败:', error)
+  }
+}
+
 // 页面加载时获取应用信息
-onMounted(() => {
-  fetchAppInfo()
+onMounted(async () => {
+  await fetchAppInfo()
+
+  // 检查并恢复活跃任务（仅对已有应用）
+  if (appId.value && appId.value !== 'new' && !isGenerating.value) {
+    await resumeActiveTask()
+  }
 
   // 监听 iframe 消息
   window.addEventListener('message', (event) => {

@@ -3,7 +3,6 @@ package com.yupi.yuaicodemother.ai;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.yupi.yuaicodemother.ai.guardrail.PromptSafetyInputGuardrail;
-import com.yupi.yuaicodemother.ai.guardrail.RetryOutputGuardrail;
 import com.yupi.yuaicodemother.ai.tools.*;
 import com.yupi.yuaicodemother.exception.BusinessException;
 import com.yupi.yuaicodemother.exception.ErrorCode;
@@ -53,9 +52,7 @@ public class AiCodeGeneratorServiceFactory {
             .maximumSize(1000)
             .expireAfterWrite(Duration.ofMinutes(30))
             .expireAfterAccess(Duration.ofMinutes(10))
-            .removalListener((key, value, cause) -> {
-                log.debug("AI 服务实例被移除，缓存键: {}, 原因: {}", key, cause);
-            })
+            .removalListener((key, value, cause) -> log.debug("AI 服务实例被移除，缓存键: {}, 原因: {}", key, cause))
             .build();
 
     /**
@@ -94,7 +91,7 @@ public class AiCodeGeneratorServiceFactory {
                 .builder()
                 .id(appId)
                 .chatMemoryStore(redisChatMemoryStore)
-                .maxMessages(20)
+                .maxMessages(100)
                 .build();
         // 从数据库中加载对话历史到记忆中
         chatHistoryService.loadChatHistoryToMemory(appId, chatMemory, 20);

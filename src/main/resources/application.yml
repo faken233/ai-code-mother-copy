@@ -51,16 +51,16 @@ langchain4j:
 #      strict-json-schema: true
 #      response-format: json_object
       max-tokens: 8192
-      log-requests: true
-      log-responses: true
+      log-requests: false
+      log-responses: false
       max-retries: 3
     streaming-chat-model:
       base-url: https://api.deepseek.com
       api-key: <Your API Key>
       model-name: deepseek-chat
       max-tokens: 8192
-      log-requests: true
-      log-responses: true
+      log-requests: false
+      log-responses: false
     # 推理 AI 模型配置（用于复杂的推理任务）
     reasoning-streaming-chat-model:
       base-url: https://api.deepseek.com
@@ -68,16 +68,16 @@ langchain4j:
       model-name: deepseek-reasoner
       max-tokens: 32768
       temperature: 0.1
-      log-requests: true
-      log-responses: true
+      log-requests: false
+      log-responses: false
     # 智能路由 AI 模型配置（用于简单的分类任务）
     routing-chat-model:
       base-url: https://dashscope.aliyuncs.com/compatible-mode/v1
       api-key: <Your API Key>
       model-name: qwen-turbo
       max-tokens: 100
-      log-requests: true
-      log-responses: true
+      log-requests: false
+      log-responses: false
 # 添加 COS 对象存储配置（需要从腾讯云获取）
 cos:
   client:
@@ -93,6 +93,13 @@ pexels:
 dashscope:
   api-key: <Your API Key>
   image-model: wan2.2-t2i-flash
+# 日志配置
+logging:
+  level:
+    # 开启 LangChain4j 的请求/响应日志（调试时使用）
+    dev.langchain4j: DEBUG
+    # 如果使用 OkHttp 客户端
+    okhttp3.logging: DEBUG
 # 监控
 management:
   endpoints:

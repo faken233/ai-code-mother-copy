@@ -31,9 +31,9 @@ public class ReasoningStreamingChatModelConfig {
 
     private Double temperature;
 
-    private Boolean logRequests = false;
+    private Boolean logRequests;
 
-    private Boolean logResponses = false;
+    private Boolean logResponses;
 
     private Duration timeout;
     /**

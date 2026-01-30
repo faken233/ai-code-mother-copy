@@ -51,7 +51,6 @@ public class GenTaskServiceImpl extends ServiceImpl<GenTaskMapper, GenTask> impl
             appAddRequest.setInitPrompt(message);
             appId = appService.createApp(appAddRequest, loginUser);
             app = appService.getById(appId);
-            log.info("首次对话，自动创建应用，appId: {}, userId: {}", appId, loginUser.getId());
         } else {
             // 查询已有应用信息
             app = appService.getById(appId);
