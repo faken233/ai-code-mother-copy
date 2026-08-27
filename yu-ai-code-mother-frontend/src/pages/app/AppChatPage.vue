@@ -73,7 +73,49 @@
                 <a-avatar :src="aiAvatar" />
               </div>
               <div class="message-content">
+                <!-- 正文内容（优先显示，minimax 等模型会先输出说明文字） -->
                 <MarkdownRenderer v-if="message.content" :content="message.content" />
+
+                <!-- 结构化消息块：思考过程 / 工具调用 -->
+                <div v-for="(block, blockIndex) in message.blocks" :key="`block-${blockIndex}`" class="message-block">
+                  <div v-if="block.type === 'thinking'" class="thinking-block">
+                    <div class="block-header" @click="toggleBlock(message, blockIndex)">
+                      <span class="block-title">
+                        <LoadingOutlined v-if="block.collapsed === false" spin />
+                        <BulbOutlined v-else />
+                        思考过程
+                      </span>
+                      <span class="block-toggle">{{ block.collapsed === false ? '收起' : '展开' }}</span>
+                    </div>
+                    <div v-if="block.collapsed !== true" class="block-body thinking-body">
+                      {{ block.content }}
+                    </div>
+                  </div>
+                  <div v-else-if="block.type === 'tool_request'" class="tool-request-block">
+                    <div class="block-header" @click="toggleBlock(message, blockIndex)">
+                      <span class="block-title">
+                        <ToolOutlined />
+                        调用工具：{{ block.displayName || block.name }}
+                        <span v-if="block.summary" class="tool-summary">{{ block.summary }}</span>
+                      </span>
+                      <span class="block-toggle">{{ block.collapsed === false ? '收起' : '展开' }}</span>
+                    </div>
+                  </div>
+                  <div v-else-if="block.type === 'tool_executed'" class="tool-executed-block">
+                    <div class="block-header" @click="toggleBlock(message, blockIndex)">
+                      <span class="block-title">
+                        <CheckCircleOutlined />
+                        {{ block.displayName || block.name }} 执行完成
+                        <span v-if="block.summary" class="tool-summary">{{ block.summary }}</span>
+                      </span>
+                      <span class="block-toggle">{{ block.collapsed === false ? '收起' : '展开' }}</span>
+                    </div>
+                    <div v-if="block.collapsed !== true" class="block-body tool-executed-body">
+                      <pre>{{ block.result }}</pre>
+                    </div>
+                  </div>
+                </div>
+
                 <div v-if="message.loading" class="loading-indicator">
                   <a-spin size="small" />
                   <span>AI 正在思考...</span>
@@ -259,6 +301,10 @@ import {
   InfoCircleOutlined,
   DownloadOutlined,
   EditOutlined,
+  LoadingOutlined,
+  BulbOutlined,
+  ToolOutlined,
+  CheckCircleOutlined,
 } from '@ant-design/icons-vue'
 
 const route = useRoute()
@@ -269,12 +315,26 @@ const loginUserStore = useLoginUserStore()
 const appInfo = ref<API.AppVO>()
 const appId = ref<any>()
 
+// 结构化消息块（思考块 / 工具请求块 / 工具执行块）
+interface MessageBlock {
+  type: 'thinking' | 'tool_request' | 'tool_executed'
+  displayName?: string
+  name?: string
+  arguments?: string
+  result?: string
+  /** 工具参数摘要（如文件路径） */
+  summary?: string
+  content?: string
+  collapsed?: boolean
+}
+
 // 对话相关
 interface Message {
   type: 'user' | 'ai'
   content: string
   loading?: boolean
   createTime?: string
+  blocks?: MessageBlock[]
 }
 
 const messages = ref<Message[]>([])
@@ -564,7 +624,7 @@ const generateCode = async (userMessage: string, aiMessageIndex: number) => {
       maxRetries: 10,
       retryInterval: 3000,
 
-      // 数据回调
+      // 数据回调（正文增量）
       onData: (chunk: string) => {
         // 如果还有排队提示，清除它
         if (messages.value[aiMessageIndex].content.startsWith('⏳')) {
@@ -572,6 +632,69 @@ const generateCode = async (userMessage: string, aiMessageIndex: number) => {
         }
         messages.value[aiMessageIndex].content += chunk
         messages.value[aiMessageIndex].loading = false
+        scrollToBottom()
+      },
+
+      // 思考过程回调
+      onThinking: (event) => {
+        const msg = messages.value[aiMessageIndex]
+        if (!msg.blocks) {
+          msg.blocks = []
+        }
+        const lastBlock = msg.blocks[msg.blocks.length - 1]
+        if (lastBlock && lastBlock.type === 'thinking') {
+          // 追加到最后一个思考块
+          lastBlock.content = (lastBlock.content || '') + event.data
+        } else {
+          msg.blocks.push({
+            type: 'thinking',
+            content: event.data,
+            collapsed: true,
+          })
+        }
+        msg.loading = true
+        scrollToBottom()
+      },
+
+      // 工具调用请求回调（工具执行完成后触发，参数完整）
+      onToolRequest: (event) => {
+        const msg = messages.value[aiMessageIndex]
+        if (!msg.blocks) {
+          msg.blocks = []
+        }
+        // 同一个工具 ID 只保留一个请求块
+        const existing = msg.blocks.find(
+          (b) => b.type === 'tool_request' && (b as MessageBlock).name === event.name && (b as MessageBlock).summary === event.summary,
+        )
+        if (existing) {
+          return
+        }
+        msg.blocks.push({
+          type: 'tool_request',
+          name: event.name,
+          displayName: event.displayName,
+          summary: event.summary,
+          collapsed: false,
+        })
+        msg.loading = true
+        scrollToBottom()
+      },
+
+      // 工具执行结果回调
+      onToolExecuted: (event) => {
+        const msg = messages.value[aiMessageIndex]
+        if (!msg.blocks) {
+          msg.blocks = []
+        }
+        msg.blocks.push({
+          type: 'tool_executed',
+          name: event.name,
+          displayName: event.displayName,
+          summary: event.summary,
+          result: event.result,
+          collapsed: true,
+        })
+        msg.loading = true
         scrollToBottom()
       },
 
@@ -705,6 +828,14 @@ const updatePreview = () => {
 const scrollToBottom = () => {
   if (messagesContainer.value) {
     messagesContainer.value.scrollTop = messagesContainer.value.scrollHeight
+  }
+}
+
+// 切换消息块的折叠状态
+const toggleBlock = (message: Message, blockIndex: number) => {
+  const block = message.blocks?.[blockIndex]
+  if (block) {
+    block.collapsed = block.collapsed !== true
   }
 }
 
@@ -1129,6 +1260,89 @@ onUnmounted(() => {
   align-items: center;
   gap: 8px;
   color: #666;
+}
+
+/* 结构化消息块（思考 / 工具） */
+.message-block {
+  margin-bottom: 8px;
+}
+
+.thinking-block,
+.tool-request-block,
+.tool-executed-block {
+  border: 1px solid #e8e8e8;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #fafafa;
+}
+
+.block-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 12px;
+  cursor: pointer;
+  user-select: none;
+  font-size: 13px;
+  color: #555;
+}
+
+.block-header:hover {
+  background: #f0f0f0;
+}
+
+.block-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+}
+
+.tool-summary {
+  font-size: 12px;
+  color: #999;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 220px;
+}
+
+.block-toggle {
+  color: #999;
+  font-size: 12px;
+}
+
+.block-body {
+  padding: 8px 12px;
+  border-top: 1px solid #e8e8e8;
+  font-size: 13px;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.thinking-body {
+  color: #888;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.tool-request-body pre,
+.tool-executed-body pre {
+  margin: 0;
+  font-size: 12px;
+  color: #444;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+}
+
+.tool-executed-block {
+  border-color: #b7eb8f;
+  background: #f6ffed;
+}
+
+.tool-executed-block .block-header {
+  color: #389e0d;
 }
 
 /* 加载更多按钮 */

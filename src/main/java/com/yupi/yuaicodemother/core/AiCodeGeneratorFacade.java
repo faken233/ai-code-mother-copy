@@ -1,11 +1,13 @@
 package com.yupi.yuaicodemother.core;
 
+import cn.hutool.json.JSONObject;
 import cn.hutool.json.JSONUtil;
 import com.yupi.yuaicodemother.ai.AiCodeGeneratorService;
 import com.yupi.yuaicodemother.ai.AiCodeGeneratorServiceFactory;
 import com.yupi.yuaicodemother.ai.model.HtmlCodeResult;
 import com.yupi.yuaicodemother.ai.model.MultiFileCodeResult;
 import com.yupi.yuaicodemother.ai.model.message.AiResponseMessage;
+import com.yupi.yuaicodemother.ai.model.message.ThinkingMessage;
 import com.yupi.yuaicodemother.ai.model.message.ToolExecutedMessage;
 import com.yupi.yuaicodemother.ai.model.message.ToolRequestMessage;
 import com.yupi.yuaicodemother.core.builder.VueProjectBuilder;
@@ -14,6 +16,7 @@ import com.yupi.yuaicodemother.core.saver.CodeFileSaverExecutor;
 import com.yupi.yuaicodemother.exception.BusinessException;
 import com.yupi.yuaicodemother.exception.ErrorCode;
 import com.yupi.yuaicodemother.model.enums.CodeGenTypeEnum;
+import dev.langchain4j.http.client.sse.ServerSentEvent;
 import dev.langchain4j.model.chat.response.ChatResponse;
 import dev.langchain4j.service.TokenStream;
 import dev.langchain4j.service.tool.ToolExecution;
@@ -117,13 +120,20 @@ public class AiCodeGeneratorFacade {
                         AiResponseMessage aiResponseMessage = new AiResponseMessage(partialResponse);
                         sink.next(JSONUtil.toJsonStr(aiResponseMessage));
                     })
-                    .onPartialToolExecutionRequest((index, toolExecutionRequest) -> {
-                        ToolRequestMessage toolRequestMessage = new ToolRequestMessage(toolExecutionRequest);
-                        sink.next(JSONUtil.toJsonStr(toolRequestMessage));
+                    .onPartialThinking((partialThinking) -> {
+                        ThinkingMessage thinkingMessage = new ThinkingMessage(partialThinking);
+                        sink.next(JSONUtil.toJsonStr(thinkingMessage));
                     })
                     .onToolExecuted((ToolExecution toolExecution) -> {
+                        // 工具已完整执行，参数完整。先发一个工具请求块（供前端展示调用摘要），再发执行结果
+                        ToolRequestMessage toolRequestMessage = new ToolRequestMessage(toolExecution.request());
+                        sink.next(JSONUtil.toJsonStr(toolRequestMessage));
                         ToolExecutedMessage toolExecutedMessage = new ToolExecutedMessage(toolExecution);
                         sink.next(JSONUtil.toJsonStr(toolExecutedMessage));
+                    })
+                    .onUnmappedRawEvent((rawEvent) -> {
+                        // 兼容 commandcode.ai 网关返回的 reasoning 字段（langchain4j 只识别 reasoning_content）
+                        extractReasoningAndEmit(rawEvent, sink);
                     })
                     .onCompleteResponse((ChatResponse response) -> {
 //                        String projectPath = AppConstant.CODE_OUTPUT_ROOT_DIR + "/vue_project_" + appId;
@@ -136,6 +146,30 @@ public class AiCodeGeneratorFacade {
                     })
                     .start();
         });
+    }
+
+    /**
+     * 从未映射的原始 SSE 事件中解析 reasoning 字段，并转换为思考块消息发出
+     *
+     * @param rawEvent 原始事件（通常为 ServerSentEvent）
+     * @param sink     流式输出
+     */
+    private void extractReasoningAndEmit(Object rawEvent, reactor.core.publisher.FluxSink<String> sink) {
+        if (!(rawEvent instanceof ServerSentEvent serverSentEvent)) {
+            return;
+        }
+        try {
+            JSONObject json = JSONUtil.parseObj(serverSentEvent.data());
+            JSONObject choices = json.getJSONArray("choices").getJSONObject(0);
+            JSONObject delta = choices.getJSONObject("delta");
+            String reasoning = delta.getStr("reasoning");
+            if (reasoning != null && !reasoning.isEmpty()) {
+                ThinkingMessage thinkingMessage = new ThinkingMessage(reasoning);
+                sink.next(JSONUtil.toJsonStr(thinkingMessage));
+            }
+        } catch (Exception ignored) {
+            // 忽略无法解析的原始事件
+        }
     }
 
     /**

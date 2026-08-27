@@ -8,6 +8,9 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Scope;
 
+import java.time.Duration;
+import java.util.List;
+
 /**
  * 智能路由模型配置
  */
@@ -26,6 +29,16 @@ public class RoutingAiModelConfig {
 
     private Double temperature;
 
+    private Double topP;
+
+    private List<String> stop;
+
+    private Double frequencyPenalty;
+
+    private Double presencePenalty;
+
+    private Duration timeout;
+
     private Boolean logRequests = false;
 
     private Boolean logResponses = false;
@@ -42,6 +55,11 @@ public class RoutingAiModelConfig {
                 .baseUrl(baseUrl)
                 .maxTokens(maxTokens)
                 .temperature(temperature)
+                .topP(topP)
+                .stop(stop)
+                .frequencyPenalty(frequencyPenalty)
+                .presencePenalty(presencePenalty)
+                .timeout(timeout)
                 .logRequests(logRequests)
                 .logResponses(logResponses)
                 .build();

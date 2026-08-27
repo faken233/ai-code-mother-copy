@@ -31,11 +31,25 @@ public class ReasoningStreamingChatModelConfig {
 
     private Double temperature;
 
+    private Double topP;
+
+    private List<String> stop;
+
+    private Double frequencyPenalty;
+
+    private Double presencePenalty;
+
     private Boolean logRequests;
 
     private Boolean logResponses;
 
     private Duration timeout;
+
+    /**
+     * 是否返回思考/推理内容（默认开启，用于前端折叠展示）
+     */
+    private Boolean returnThinking = true;
+
     /**
      * 推理流式模型（用于 Vue 项目生成，带工具调用）
      */
@@ -48,10 +62,15 @@ public class ReasoningStreamingChatModelConfig {
                 .modelName(modelName)
                 .maxTokens(maxTokens)
                 .temperature(temperature)
+                .topP(topP)
+                .stop(stop)
+                .frequencyPenalty(frequencyPenalty)
+                .presencePenalty(presencePenalty)
                 .logRequests(logRequests)
                 .logResponses(logResponses)
                 .listeners(List.of(aiModelMonitorListener))
                 .timeout(timeout)
+                .returnThinking(returnThinking)
                 .build();
     }
 }

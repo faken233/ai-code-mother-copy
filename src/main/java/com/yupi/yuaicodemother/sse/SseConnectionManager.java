@@ -165,6 +165,27 @@ public class SseConnectionManager {
     }
 
     /**
+     * 发送结构化事件（思考过程 / 工具请求 / 工具执行等）
+     *
+     * @param taskId    任务ID
+     * @param eventName 事件名称
+     * @param payload   事件数据
+     */
+    public void sendEvent(Long taskId, String eventName, String payload) {
+        FluxSink<ServerSentEvent<String>> sink = connections.get(taskId);
+        if (sink != null) {
+            try {
+                sink.next(ServerSentEvent.<String>builder()
+                        .event(eventName)
+                        .data(payload)
+                        .build());
+            } catch (Exception e) {
+                log.error("发送结构化事件失败，taskId: {}, event: {}, error: {}", taskId, eventName, e.getMessage());
+            }
+        }
+    }
+
+    /**
      * 发送任务状态更新
      *
      * @param taskId        任务ID

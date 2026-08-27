@@ -41,9 +41,45 @@ export enum SseEventType {
   STATUS = 'status',   // 状态更新
   QUEUE = 'queue',     // 队列位置更新
   RECONNECT = 'reconnect', // 重连恢复数据
+  THINKING = 'thinking', // 思考过程
+  TOOL_REQUEST = 'tool_request', // 工具调用请求
+  TOOL_EXECUTED = 'tool_executed', // 工具执行结果
   DONE = 'done',       // 完成
   ERROR = 'error',     // 错误
   CANCELLED = 'cancelled', // 已取消
+}
+
+/**
+ * 思考过程事件数据
+ */
+export interface ThinkingEvent {
+  type: 'thinking';
+  data: string;
+}
+
+/**
+ * 工具调用请求事件数据
+ */
+export interface ToolRequestEvent {
+  type: 'tool_request';
+  id: string;
+  name: string;
+  displayName: string;
+  /** 参数摘要（如文件路径），不包含完整内容 */
+  summary: string;
+}
+
+/**
+ * 工具执行结果事件数据
+ */
+export interface ToolExecutedEvent {
+  type: 'tool_executed';
+  id: string;
+  name: string;
+  displayName: string;
+  /** 参数摘要（如文件路径） */
+  summary: string;
+  result: string;
 }
 
 /**
@@ -58,6 +94,12 @@ export interface SseConnectionConfig {
   retryInterval?: number;
   /** 数据回调 */
   onData?: (chunk: string) => void;
+  /** 思考过程回调 */
+  onThinking?: (event: ThinkingEvent) => void;
+  /** 工具调用请求回调 */
+  onToolRequest?: (event: ToolRequestEvent) => void;
+  /** 工具执行结果回调 */
+  onToolExecuted?: (event: ToolExecutedEvent) => void;
   /** 状态变更回调 */
   onStatusChange?: (status: string, queuePosition: number) => void;
   /** 队列位置更新回调 */
@@ -220,6 +262,36 @@ export class ReconnectableSseClient {
         }
       } catch (e) {
         console.error('[SSE] 解析重连数据失败:', e);
+      }
+    });
+
+    // 思考过程事件
+    this.eventSource.addEventListener('thinking', (event: MessageEvent) => {
+      try {
+        const data = JSON.parse(event.data);
+        this.config.onThinking?.(data);
+      } catch (e) {
+        console.error('[SSE] 解析思考过程失败:', e);
+      }
+    });
+
+    // 工具调用请求事件
+    this.eventSource.addEventListener('tool_request', (event: MessageEvent) => {
+      try {
+        const data = JSON.parse(event.data);
+        this.config.onToolRequest?.(data);
+      } catch (e) {
+        console.error('[SSE] 解析工具请求失败:', e);
+      }
+    });
+
+    // 工具执行结果事件
+    this.eventSource.addEventListener('tool_executed', (event: MessageEvent) => {
+      try {
+        const data = JSON.parse(event.data);
+        this.config.onToolExecuted?.(data);
+      } catch (e) {
+        console.error('[SSE] 解析工具执行结果失败:', e);
       }
     });
 
