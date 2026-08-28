@@ -11,6 +11,7 @@ import { API_BASE_URL } from '@/config/env';
  */
 export enum GenTaskStatus {
   PENDING = 'pending',
+  SANDBOX_BUILDING = 'sandbox_building',
   RUNNING = 'running',
   COMPLETED = 'completed',
   FAILED = 'failed',
@@ -41,36 +42,14 @@ export enum SseEventType {
   STATUS = 'status',   // 状态更新
   QUEUE = 'queue',     // 队列位置更新
   RECONNECT = 'reconnect', // 重连恢复数据
-  THINKING = 'thinking', // 思考过程
-  TOOL_REQUEST = 'tool_request', // 工具调用请求
-  TOOL_EXECUTED = 'tool_executed', // 工具执行结果
+  TOOL_EXECUTED = 'tool_executed', // 工具执行结果（一个块展示，含完成标记）
   DONE = 'done',       // 完成
   ERROR = 'error',     // 错误
   CANCELLED = 'cancelled', // 已取消
 }
 
 /**
- * 思考过程事件数据
- */
-export interface ThinkingEvent {
-  type: 'thinking';
-  data: string;
-}
-
-/**
- * 工具调用请求事件数据
- */
-export interface ToolRequestEvent {
-  type: 'tool_request';
-  id: string;
-  name: string;
-  displayName: string;
-  /** 参数摘要（如文件路径），不包含完整内容 */
-  summary: string;
-}
-
-/**
- * 工具执行结果事件数据
+ * 工具执行结果事件数据（工具执行完毕才发送，一个块展示）
  */
 export interface ToolExecutedEvent {
   type: 'tool_executed';
@@ -94,10 +73,6 @@ export interface SseConnectionConfig {
   retryInterval?: number;
   /** 数据回调 */
   onData?: (chunk: string) => void;
-  /** 思考过程回调 */
-  onThinking?: (event: ThinkingEvent) => void;
-  /** 工具调用请求回调 */
-  onToolRequest?: (event: ToolRequestEvent) => void;
   /** 工具执行结果回调 */
   onToolExecuted?: (event: ToolExecutedEvent) => void;
   /** 状态变更回调 */
@@ -118,11 +93,15 @@ export interface SseConnectionConfig {
  * 创建生成任务
  * @param appId 应用ID（可选，首次对话时为空，系统会自动创建应用）
  * @param message 用户消息
+ * @param codeGenType 用户手动选择的代码生成类型（可选，覆盖 AI 路由结果）
  */
-export async function createGenTask(appId: string | number | null | undefined, message: string): Promise<GenTaskVO> {
-  const data: { appId?: string | number; message: string } = { message };
+export async function createGenTask(appId: string | number | null | undefined, message: string, codeGenType?: string): Promise<GenTaskVO> {
+  const data: { appId?: string | number; message: string; codeGenType?: string } = { message };
   if (appId) {
     data.appId = appId;
+  }
+  if (codeGenType) {
+    data.codeGenType = codeGenType;
   }
   const response = await request.post('/gen-task/create', data);
   return response.data.data;
@@ -265,27 +244,7 @@ export class ReconnectableSseClient {
       }
     });
 
-    // 思考过程事件
-    this.eventSource.addEventListener('thinking', (event: MessageEvent) => {
-      try {
-        const data = JSON.parse(event.data);
-        this.config.onThinking?.(data);
-      } catch (e) {
-        console.error('[SSE] 解析思考过程失败:', e);
-      }
-    });
-
-    // 工具调用请求事件
-    this.eventSource.addEventListener('tool_request', (event: MessageEvent) => {
-      try {
-        const data = JSON.parse(event.data);
-        this.config.onToolRequest?.(data);
-      } catch (e) {
-        console.error('[SSE] 解析工具请求失败:', e);
-      }
-    });
-
-    // 工具执行结果事件
+    // 工具执行结果事件（一个块展示，含完成标记）
     this.eventSource.addEventListener('tool_executed', (event: MessageEvent) => {
       try {
         const data = JSON.parse(event.data);

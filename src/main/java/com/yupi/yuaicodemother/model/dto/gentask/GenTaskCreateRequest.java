@@ -25,4 +25,9 @@ public class GenTaskCreateRequest implements Serializable {
      * 用户消息/提示词
      */
     private String message;
+
+    /**
+     * 代码生成类型（可选，用户手动选择的模式，覆盖 AI 路由结果）
+     */
+    private String codeGenType;
 }

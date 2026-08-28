@@ -7,6 +7,7 @@ import cn.hutool.core.util.RandomUtil;
 import cn.hutool.core.util.StrUtil;
 import com.mybatisflex.core.query.QueryWrapper;
 import com.mybatisflex.spring.service.impl.ServiceImpl;
+import com.yupi.yuaicodemother.ai.AiCodeGenTypeRoutingService;
 import com.yupi.yuaicodemother.ai.AiCodeGenTypeRoutingServiceFactory;
 import com.yupi.yuaicodemother.constant.AppConstant;
 import com.yupi.yuaicodemother.core.AiCodeGeneratorFacade;
@@ -43,6 +44,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 /**
@@ -127,13 +129,22 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
         // 应用名称暂时为 initPrompt 前 12 位
         app.setAppName(initPrompt.substring(0, Math.min(initPrompt.length(), 12)));
         // 使用 AI 智能选择代码生成类型（多例模式）
-//        AiCodeGenTypeRoutingService aiCodeGenTypeRoutingService = aiCodeGenTypeRoutingServiceFactory.createAiCodeGenTypeRoutingService();
-//        CodeGenTypeEnum selectedCodeGenType = aiCodeGenTypeRoutingService.routeCodeGenType(initPrompt);
-        app.setCodeGenType(CodeGenTypeEnum.VUE_PROJECT.getValue());
+        AiCodeGenTypeRoutingService aiCodeGenTypeRoutingService = aiCodeGenTypeRoutingServiceFactory.createAiCodeGenTypeRoutingService();
+        CodeGenTypeEnum selectedCodeGenType;
+        try {
+            selectedCodeGenType = aiCodeGenTypeRoutingService.routeCodeGenType(initPrompt);
+        } catch (Exception e) {
+            log.warn("AI 路由代码生成类型失败，回退到 VUE_PROJECT：{}", e.getMessage());
+            selectedCodeGenType = CodeGenTypeEnum.VUE_PROJECT;
+        }
+        if (selectedCodeGenType == null) {
+            selectedCodeGenType = CodeGenTypeEnum.VUE_PROJECT;
+        }
+        app.setCodeGenType(selectedCodeGenType.getValue());
         // 插入数据库
         boolean result = this.save(app);
         ThrowUtils.throwIf(!result, ErrorCode.OPERATION_ERROR);
-        log.info("应用创建成功，ID: {}, 类型: {}", app.getId(), CodeGenTypeEnum.VUE_PROJECT.getValue());
+        log.info("应用创建成功，ID: {}, 类型: {}", app.getId(), selectedCodeGenType.getValue());
         return app.getId();
     }
 
@@ -175,6 +186,41 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
             ThrowUtils.throwIf(!distDir.exists(), ErrorCode.SYSTEM_ERROR, "Vue 项目构建完成但未生成 dist 目录");
             // 构建完成后，需要将构建后的文件复制到部署目录
             sourceDir = distDir;
+        } else if (codeGenTypeEnum == CodeGenTypeEnum.FULLSTACK) {
+            // 全栈项目：先构建前端（npm run build），再构建后端（mvn package）
+            File backendDir = new File(sourceDirPath, "backend");
+            File frontendDir = new File(sourceDirPath, "frontend");
+            ThrowUtils.throwIf(!backendDir.exists() || !frontendDir.exists(), ErrorCode.SYSTEM_ERROR, "全栈项目目录缺失");
+            // 构建后端：mvn package（产出 jar）
+            boolean backendBuild = buildBackendPackage(backendDir);
+            ThrowUtils.throwIf(!backendBuild, ErrorCode.SYSTEM_ERROR, "后端构建失败，请重试");
+            // 构建前端：npm run build（产出 dist）
+            boolean frontendBuild = vueProjectBuilder.buildProject(frontendDir.getPath());
+            ThrowUtils.throwIf(!frontendBuild, ErrorCode.SYSTEM_ERROR, "前端构建失败，请重试");
+            // 部署目录结构：frontend/dist/** 为静态托管根，backend/target/*.jar 单独子目录
+            File frontendDist = new File(frontendDir, "dist");
+            ThrowUtils.throwIf(!frontendDist.exists(), ErrorCode.SYSTEM_ERROR, "前端构建完成但未生成 dist 目录");
+            // 组装部署内容：先将前端 dist 复制到部署目录作为根，再把后端 jar 放到 backend/ 子目录
+            String deployDirPath = AppConstant.CODE_DEPLOY_ROOT_DIR + File.separator + deployKey;
+            File deployDir = new File(deployDirPath);
+            FileUtil.copyContent(frontendDist, deployDir, true);
+            File backendTarget = new File(backendDir, "target");
+            File jarFile = findFirstJar(backendTarget);
+            if (jarFile != null) {
+                File backendDeployDir = new File(deployDirPath, "backend");
+                backendDeployDir.mkdirs();
+                FileUtil.copy(jarFile, new File(backendDeployDir, jarFile.getName()), false);
+            }
+            // 8b. 更新数据库并返回 URL（静态托管根即前端入口）
+            App updateApp = new App();
+            updateApp.setId(appId);
+            updateApp.setDeployKey(deployKey);
+            updateApp.setDeployedTime(LocalDateTime.now());
+            boolean updateResult = this.updateById(updateApp);
+            ThrowUtils.throwIf(!updateResult, ErrorCode.OPERATION_ERROR, "更新应用部署信息失败");
+            String appDeployUrl = String.format("%s/%s/", deployHost, deployKey);
+            generateAppScreenshotAsync(appId, appDeployUrl);
+            return appDeployUrl;
         }
         // 8. 复制文件到部署目录
         String deployDirPath = AppConstant.CODE_DEPLOY_ROOT_DIR + File.separator + deployKey;
@@ -194,6 +240,50 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
         String appDeployUrl = String.format("%s/%s/", deployHost, deployKey);        // 11. 异步生成截图并且更新应用封面
         generateAppScreenshotAsync(appId, appDeployUrl);
         return appDeployUrl;
+    }
+
+    /**
+     * 构建后端项目（mvn package），返回是否成功
+     */
+    private boolean buildBackendPackage(File backendDir) {
+        try {
+            log.info("开始构建后端: {}", backendDir.getPath());
+            Process process = new ProcessBuilder("mvn", "-q", "package", "-DskipTests")
+                    .directory(backendDir)
+                    .redirectErrorStream(true)
+                    .start();
+            boolean finished = process.waitFor(300, TimeUnit.SECONDS);
+            if (!finished) {
+                process.destroyForcibly();
+                log.error("后端构建超时: {}", backendDir.getPath());
+                return false;
+            }
+            int exitCode = process.exitValue();
+            if (exitCode == 0) {
+                log.info("后端构建成功: {}", backendDir.getPath());
+                return true;
+            }
+            log.error("后端构建失败，退出码: {}", exitCode);
+            return false;
+        } catch (Exception e) {
+            log.error("执行后端构建失败: {}", e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * 在 target 目录下查找第一个可执行 jar
+     */
+    private File findFirstJar(File targetDir) {
+        if (targetDir == null || !targetDir.exists() || !targetDir.isDirectory()) {
+            return null;
+        }
+        File[] files = targetDir.listFiles((dir, name) -> name.endsWith(".jar") && !name.endsWith(".jar.original"));
+        if (files == null || files.length == 0) {
+            return null;
+        }
+        // 优先选择非 original 的 jar（可执行 jar）
+        return files[0];
     }
 
     /**

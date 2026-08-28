@@ -100,6 +100,11 @@ public class AiCodeGeneratorFacade {
                 TokenStream tokenStream = aiCodeGeneratorService.generateVueProjectCodeStream(appId, userMessage);
                 yield processTokenStream(tokenStream, appId);
             }
+            case FULLSTACK -> {
+                log.info("【AI 请求】调用 FULLSTACK 代码生成，appId: {}", appId);
+                TokenStream tokenStream = aiCodeGeneratorService.generateFullstackProjectCodeStream(appId, userMessage);
+                yield processTokenStream(tokenStream, appId);
+            }
             default -> {
                 String errorMessage = "不支持的生成类型：" + codeGenTypeEnum.getValue();
                 throw new BusinessException(ErrorCode.SYSTEM_ERROR, errorMessage);
@@ -121,23 +126,19 @@ public class AiCodeGeneratorFacade {
                         sink.next(JSONUtil.toJsonStr(aiResponseMessage));
                     })
                     .onPartialThinking((partialThinking) -> {
-                        ThinkingMessage thinkingMessage = new ThinkingMessage(partialThinking);
-                        sink.next(JSONUtil.toJsonStr(thinkingMessage));
+                        // 思考内容仅写日志，不传输前端（避免大流量导致页面卡顿）
+                        log.debug("[思考] appId: {}, thinking: {}", appId, partialThinking != null ? partialThinking.text() : "");
                     })
                     .onToolExecuted((ToolExecution toolExecution) -> {
-                        // 工具已完整执行，参数完整。先发一个工具请求块（供前端展示调用摘要），再发执行结果
-                        ToolRequestMessage toolRequestMessage = new ToolRequestMessage(toolExecution.request());
-                        sink.next(JSONUtil.toJsonStr(toolRequestMessage));
+                        // 工具执行完毕才发一个事件（含结果与完成标记），不再单独发 tool_request
                         ToolExecutedMessage toolExecutedMessage = new ToolExecutedMessage(toolExecution);
                         sink.next(JSONUtil.toJsonStr(toolExecutedMessage));
                     })
                     .onUnmappedRawEvent((rawEvent) -> {
-                        // 兼容 commandcode.ai 网关返回的 reasoning 字段（langchain4j 只识别 reasoning_content）
-                        extractReasoningAndEmit(rawEvent, sink);
+                        // 兼容 commandcode.ai 网关返回的 reasoning 字段，仅写日志，不传输前端
+                        logRawReasoning(rawEvent, appId);
                     })
                     .onCompleteResponse((ChatResponse response) -> {
-//                        String projectPath = AppConstant.CODE_OUTPUT_ROOT_DIR + "/vue_project_" + appId;
-//                        vueProjectBuilder.buildProject(projectPath);
                         sink.complete();
                     })
                     .onError((Throwable error) -> {
@@ -149,12 +150,9 @@ public class AiCodeGeneratorFacade {
     }
 
     /**
-     * 从未映射的原始 SSE 事件中解析 reasoning 字段，并转换为思考块消息发出
-     *
-     * @param rawEvent 原始事件（通常为 ServerSentEvent）
-     * @param sink     流式输出
+     * 从未映射的原始 SSE 事件中解析 reasoning 字段，仅写日志用于排查，不传输前端。
      */
-    private void extractReasoningAndEmit(Object rawEvent, reactor.core.publisher.FluxSink<String> sink) {
+    private void logRawReasoning(Object rawEvent, Long appId) {
         if (!(rawEvent instanceof ServerSentEvent serverSentEvent)) {
             return;
         }
@@ -164,8 +162,7 @@ public class AiCodeGeneratorFacade {
             JSONObject delta = choices.getJSONObject("delta");
             String reasoning = delta.getStr("reasoning");
             if (reasoning != null && !reasoning.isEmpty()) {
-                ThinkingMessage thinkingMessage = new ThinkingMessage(reasoning);
-                sink.next(JSONUtil.toJsonStr(thinkingMessage));
+                log.debug("[思考] appId: {}, reasoning: {}", appId, reasoning);
             }
         } catch (Exception ignored) {
             // 忽略无法解析的原始事件

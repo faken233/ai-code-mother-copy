@@ -7,6 +7,15 @@
         <a-tag v-if="appInfo?.codeGenType" color="blue" class="code-gen-type-tag">
           {{ formatCodeGenType(appInfo.codeGenType) }}
         </a-tag>
+        <!-- 模式切换按钮（新建应用时选择，覆盖 AI 路由结果） -->
+        <a-select
+          v-if="!appId"
+          v-model:value="selectedMode"
+          class="mode-select"
+          size="small"
+          :options="modeOptions"
+          @change="onModeChange"
+        />
       </div>
       <div class="header-right">
         <a-button type="default" @click="showAppDetail">
@@ -76,38 +85,16 @@
                 <!-- 正文内容（优先显示，minimax 等模型会先输出说明文字） -->
                 <MarkdownRenderer v-if="message.content" :content="message.content" />
 
-                <!-- 结构化消息块：思考过程 / 工具调用 -->
+                <!-- 结构化消息块：统一为一个工具块，执行完毕才出现，含完成标记 -->
                 <div v-for="(block, blockIndex) in message.blocks" :key="`block-${blockIndex}`" class="message-block">
-                  <div v-if="block.type === 'thinking'" class="thinking-block">
-                    <div class="block-header" @click="toggleBlock(message, blockIndex)">
-                      <span class="block-title">
-                        <LoadingOutlined v-if="block.collapsed === false" spin />
-                        <BulbOutlined v-else />
-                        思考过程
-                      </span>
-                      <span class="block-toggle">{{ block.collapsed === false ? '收起' : '展开' }}</span>
-                    </div>
-                    <div v-if="block.collapsed !== true" class="block-body thinking-body">
-                      {{ block.content }}
-                    </div>
-                  </div>
-                  <div v-else-if="block.type === 'tool_request'" class="tool-request-block">
-                    <div class="block-header" @click="toggleBlock(message, blockIndex)">
-                      <span class="block-title">
-                        <ToolOutlined />
-                        调用工具：{{ block.displayName || block.name }}
-                        <span v-if="block.summary" class="tool-summary">{{ block.summary }}</span>
-                      </span>
-                      <span class="block-toggle">{{ block.collapsed === false ? '收起' : '展开' }}</span>
-                    </div>
-                  </div>
-                  <div v-else-if="block.type === 'tool_executed'" class="tool-executed-block">
+                  <div v-if="block.type === 'tool_executed'" class="tool-executed-block">
                     <div class="block-header" @click="toggleBlock(message, blockIndex)">
                       <span class="block-title">
                         <CheckCircleOutlined />
-                        {{ block.displayName || block.name }} 执行完成
+                        {{ block.displayName || block.name }}
                         <span v-if="block.summary" class="tool-summary">{{ block.summary }}</span>
                       </span>
+                      <span class="block-status">✅ 完成</span>
                       <span class="block-toggle">{{ block.collapsed === false ? '收起' : '展开' }}</span>
                     </div>
                     <div v-if="block.collapsed !== true" class="block-body tool-executed-body">
@@ -273,6 +260,7 @@ import {
   getAppVoById,
   deployApp as deployAppApi,
   deleteApp as deleteAppApi,
+  previewApp as previewAppApi,
 } from '@/api/appController'
 import { listAppChatHistory } from '@/api/chatHistoryController'
 import { CodeGenTypeEnum, formatCodeGenType } from '@/utils/codeGenTypes'
@@ -301,9 +289,6 @@ import {
   InfoCircleOutlined,
   DownloadOutlined,
   EditOutlined,
-  LoadingOutlined,
-  BulbOutlined,
-  ToolOutlined,
   CheckCircleOutlined,
 } from '@ant-design/icons-vue'
 
@@ -315,16 +300,27 @@ const loginUserStore = useLoginUserStore()
 const appInfo = ref<API.AppVO>()
 const appId = ref<any>()
 
-// 结构化消息块（思考块 / 工具请求块 / 工具执行块）
+// 用户手动选择的生成模式（默认自动，由后端 AI 路由决定）
+const selectedMode = ref<string>('')
+const modeOptions = [
+  { label: '自动识别', value: '' },
+  { label: '前端项目', value: CodeGenTypeEnum.VUE_PROJECT },
+  { label: '全栈项目', value: CodeGenTypeEnum.FULLSTACK },
+]
+const onModeChange = (val: string) => {
+  console.log('[GenTask] 手动选择生成模式:', val)
+}
+
+// 结构化消息块（统一为一个工具块，执行完毕才出现，含完成标记）
 interface MessageBlock {
-  type: 'thinking' | 'tool_request' | 'tool_executed'
+  type: 'tool_executed'
   displayName?: string
   name?: string
-  arguments?: string
   result?: string
   /** 工具参数摘要（如文件路径） */
   summary?: string
-  content?: string
+  /** 执行状态标记 */
+  status?: 'completed'
   collapsed?: boolean
 }
 
@@ -410,16 +406,44 @@ const loadChatHistory = async (isLoadMore = false) => {
     }
     const res = await listAppChatHistory(params)
     if (res.data.code === 0 && res.data.data) {
-      const chatHistories = res.data.data.records || []
+      const chatHistories = (res.data.data.records || []).reverse() // 后端降序，反转为升序（旧→新）
       if (chatHistories.length > 0) {
-        // 将对话历史转换为消息格式，并按时间正序排列（老消息在前）
-        const historyMessages: Message[] = chatHistories
-            .map((chat) => ({
-              type: (chat.messageType === 'user' ? 'user' : 'ai') as 'user' | 'ai',
-              content: chat.message || '',
-              createTime: chat.createTime,
-            }))
-            .reverse() // 反转数组，让老消息在前
+        // 将对话历史转换为消息格式，按时间正序处理
+        const historyMessages: Message[] = []
+        for (const chat of chatHistories) {
+          if (chat.messageType === 'tool_call') {
+            // 工具调用块：附加到前一条 AI 消息的 blocks 中
+            let lastAi = historyMessages.findLast((m) => m.type === 'ai')
+            if (!lastAi) {
+              lastAi = { type: 'ai', content: '', blocks: [] }
+              historyMessages.push(lastAi)
+            }
+            if (!lastAi.blocks) {
+              lastAi.blocks = []
+            }
+            try {
+              const toolData = JSON.parse(chat.message || '{}')
+              lastAi.blocks.push({
+                type: 'tool_executed',
+                name: toolData.name,
+                displayName: toolData.displayName,
+                summary: toolData.summary,
+                result: toolData.result,
+                status: 'completed',
+                collapsed: true,
+              })
+            } catch (e) {
+              console.warn('解析工具块历史失败:', e)
+            }
+            continue
+          }
+          historyMessages.push({
+            type: (chat.messageType === 'user' ? 'user' : 'ai') as 'user' | 'ai',
+            content: chat.message || '',
+            createTime: chat.createTime,
+            blocks: [],
+          })
+        }
         if (isLoadMore) {
           // 加载更多时，将历史消息添加到开头
           messages.value.unshift(...historyMessages)
@@ -586,7 +610,8 @@ const generateCode = async (userMessage: string, aiMessageIndex: number) => {
   try {
     // 1. 创建生成任务（appId 可能为空，首次对话时系统会自动创建应用）
     // 注意：appId 使用字符串类型，避免大整数精度丢失
-    const task = await createGenTask(appId.value || null, userMessage)
+    // 若用户手动选择了模式，则传给后端覆盖 AI 路由结果
+    const task = await createGenTask(appId.value || null, userMessage, selectedMode.value || undefined)
     currentTask.value = task
     queuePosition.value = task.queuePosition
 
@@ -635,76 +660,36 @@ const generateCode = async (userMessage: string, aiMessageIndex: number) => {
         scrollToBottom()
       },
 
-      // 思考过程回调
-      onThinking: (event) => {
-        const msg = messages.value[aiMessageIndex]
-        if (!msg.blocks) {
-          msg.blocks = []
-        }
-        const lastBlock = msg.blocks[msg.blocks.length - 1]
-        if (lastBlock && lastBlock.type === 'thinking') {
-          // 追加到最后一个思考块
-          lastBlock.content = (lastBlock.content || '') + event.data
-        } else {
-          msg.blocks.push({
-            type: 'thinking',
-            content: event.data,
-            collapsed: true,
-          })
-        }
-        msg.loading = true
-        scrollToBottom()
-      },
-
-      // 工具调用请求回调（工具执行完成后触发，参数完整）
-      onToolRequest: (event) => {
-        const msg = messages.value[aiMessageIndex]
-        if (!msg.blocks) {
-          msg.blocks = []
-        }
-        // 同一个工具 ID 只保留一个请求块
-        const existing = msg.blocks.find(
-          (b) => b.type === 'tool_request' && (b as MessageBlock).name === event.name && (b as MessageBlock).summary === event.summary,
-        )
-        if (existing) {
-          return
-        }
-        msg.blocks.push({
-          type: 'tool_request',
-          name: event.name,
-          displayName: event.displayName,
-          summary: event.summary,
-          collapsed: false,
-        })
-        msg.loading = true
-        scrollToBottom()
-      },
-
-      // 工具执行结果回调
+      // 工具执行结果回调（统一为一个工具块，含完成标记）
       onToolExecuted: (event) => {
         const msg = messages.value[aiMessageIndex]
         if (!msg.blocks) {
           msg.blocks = []
         }
+        // 一个工具调用一个块，执行完毕才出现，标记为完成
         msg.blocks.push({
           type: 'tool_executed',
           name: event.name,
           displayName: event.displayName,
           summary: event.summary,
           result: event.result,
+          status: 'completed',
           collapsed: true,
         })
         msg.loading = true
         scrollToBottom()
       },
 
-      // 状态变更回调
+      // 状态变更回调（含沙箱搭建阶段）
       onStatusChange: (status: string, position: number) => {
         console.log(`[GenTask] 状态变更: ${status}, 队列位置: ${position}`)
         queuePosition.value = position
 
-        if (status === GenTaskStatus.RUNNING) {
-          // 任务开始执行
+        if (status === GenTaskStatus.SANDBOX_BUILDING) {
+          messages.value[aiMessageIndex].content = '⏳ 沙箱搭建中...'
+          messages.value[aiMessageIndex].loading = true
+        } else if (status === GenTaskStatus.RUNNING) {
+          // 任务开始执行代码生成
           if (messages.value[aiMessageIndex].content.startsWith('⏳')) {
             messages.value[aiMessageIndex].content = ''
           }
@@ -815,9 +800,25 @@ const handleError = (error: unknown, aiMessageIndex: number) => {
 }
 
 // 更新预览
-const updatePreview = () => {
+const updatePreview = async () => {
   if (appId.value) {
     const codeGenType = appInfo.value?.codeGenType || CodeGenTypeEnum.HTML
+    // 全栈项目：通过后端启动沙箱预览，返回带 appId 的预览 URL（隔离只存在于预览层）
+    if (codeGenType === CodeGenTypeEnum.FULLSTACK) {
+      try {
+        const res = await previewAppApi(appId.value)
+        if (res.data.code === 0 && res.data.data) {
+          previewUrl.value = res.data.data
+          previewReady.value = true
+        } else {
+          message.error('启动预览失败：' + res.data.message)
+        }
+      } catch (e) {
+        console.error('启动全栈预览失败:', e)
+        message.error('启动预览失败，请重试')
+      }
+      return
+    }
     const newPreviewUrl = getStaticPreviewUrl(codeGenType, appId.value)
     previewUrl.value = newPreviewUrl
     previewReady.value = true
@@ -1163,6 +1164,11 @@ onUnmounted(() => {
   font-size: 12px;
 }
 
+.mode-select {
+  margin-left: 8px;
+  width: 120px;
+}
+
 .app-name {
   margin: 0;
   font-size: 18px;
@@ -1310,6 +1316,12 @@ onUnmounted(() => {
 .block-toggle {
   color: #999;
   font-size: 12px;
+}
+
+.block-status {
+  color: #389e0d;
+  font-size: 12px;
+  font-weight: 500;
 }
 
 .block-body {

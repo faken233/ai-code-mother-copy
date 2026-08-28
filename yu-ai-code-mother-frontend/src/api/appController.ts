@@ -180,3 +180,14 @@ export async function updateApp(body: API.AppUpdateRequest, options?: { [key: st
     ...(options || {}),
   })
 }
+
+/** POST /app/preview/{appId} 全栈项目沙箱预览 */
+export async function previewApp(
+  appId: string | number,
+  options?: { [key: string]: any },
+) {
+  return request<API.BaseResponseString>(`/app/preview/${appId}`, {
+    method: 'POST',
+    ...(options || {}),
+  })
+}

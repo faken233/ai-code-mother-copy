@@ -10,7 +10,8 @@ import lombok.Getter;
 public enum ChatHistoryMessageTypeEnum {
 
     USER("用户", "user"),
-    AI("AI", "ai");
+    AI("AI", "ai"),
+    TOOL_CALL("工具调用", "tool_call");
 
     private final String text;
 

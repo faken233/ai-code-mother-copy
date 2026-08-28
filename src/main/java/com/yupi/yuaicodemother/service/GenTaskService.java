@@ -25,6 +25,17 @@ public interface GenTaskService extends IService<GenTask> {
     GenTask createTask(Long appId, String message, User loginUser);
 
     /**
+     * 创建新的生成任务（带用户手动选择的代码生成类型）
+     *
+     * @param appId       应用ID（可选，为空时自动创建应用）
+     * @param message     用户消息
+     * @param codeGenType 用户手动选择的代码生成类型（覆盖 AI 路由结果，可为空）
+     * @param loginUser   登录用户
+     * @return 任务对象
+     */
+    GenTask createTask(Long appId, String message, String codeGenType, User loginUser);
+
+    /**
      * 获取任务详情
      *
      * @param taskId    任务ID
@@ -47,6 +58,13 @@ public interface GenTaskService extends IService<GenTask> {
      * @param taskId 任务ID
      */
     void markTaskRunning(Long taskId);
+
+    /**
+     * 更新任务状态为沙箱搭建中
+     *
+     * @param taskId 任务ID
+     */
+    void markTaskSandboxBuilding(Long taskId);
 
     /**
      * 更新任务状态为已完成

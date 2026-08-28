@@ -1,0 +1,174 @@
+version: "3.9"
+
+# 代码生成系统一键部署（全栈）
+# 服务清单：
+#   platform-mysql  平台主库    -> 宿主机 3306
+#   platform-redis  平台缓存/限流 -> 宿主机 6379
+#   sandbox-mysql   沙箱项目库   -> 宿主机 3307（物理隔离）
+#   sandbox-redis   沙箱项目缓存 -> 宿主机 6380（物理隔离）
+#   backend         主服务 Spring Boot
+#   frontend        前端 nginx
+#
+# 沙箱容器（code-sandbox）由主服务通过 docker.sock 按 appId 动态拉起，
+# 端口绑定在宿主机（18080+ / 19080+），不在此 compose 中声明。
+
+services:
+  # ===== 平台中间件 =====
+  platform-mysql:
+    image: mysql:8.0
+    container_name: yu-ai-platform-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${PLATFORM_MYSQL_PASSWORD:-123456}
+      MYSQL_DATABASE: yu_ai_code_mother
+      TZ: Asia/Shanghai
+    command: --default-authentication-plugin=mysql_native_password --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    ports:
+      - "3306:3306"
+    volumes:
+      - platform_mysql_data:/var/lib/mysql
+      - ./sql:/docker-entrypoint-initdb.d:ro   # 自动执行建表
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-p${PLATFORM_MYSQL_PASSWORD:-123456}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - codegen
+
+  platform-redis:
+    image: redis:6.2
+    container_name: yu-ai-platform-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - platform_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - codegen
+
+  # ===== 沙箱专用中间件（与平台物理隔离）=====
+  sandbox-mysql:
+    image: mysql:8.0
+    container_name: yu-ai-sandbox-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${SANDBOX_MYSQL_PASSWORD:-123456}
+      TZ: Asia/Shanghai
+    command: --default-authentication-plugin=mysql_native_password --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    ports:
+      - "3307:3306"
+    volumes:
+      - sandbox_mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-p${SANDBOX_MYSQL_PASSWORD:-123456}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - codegen
+
+  sandbox-redis:
+    image: redis:6.2
+    container_name: yu-ai-sandbox-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    ports:
+      - "6380:6379"
+    volumes:
+      - sandbox_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - codegen
+
+  # ===== 主服务 =====
+  backend:
+    build:
+      context: .
+      dockerfile: docker/backend.Dockerfile
+    container_name: yu-ai-code-mother-backend
+    restart: unless-stopped
+    depends_on:
+      platform-mysql:
+        condition: service_healthy
+      platform-redis:
+        condition: service_healthy
+    environment:
+      SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE:-local}
+      # 平台数据源：连 compose 内的 platform-mysql（服务名）
+      SPRING_DATASOURCE_URL: jdbc:mysql://platform-mysql:3306/yu_ai_code_mother?useUnicode=true&characterEncoding=UTF-8&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Shanghai
+      SPRING_DATASOURCE_USERNAME: root
+      SPRING_DATASOURCE_PASSWORD: ${PLATFORM_MYSQL_PASSWORD:-123456}
+      # 平台 Redis：连 compose 内的 platform-redis
+      SPRING_DATA_REDIS_HOST: platform-redis
+      SPRING_DATA_REDIS_PORT: 6379
+      SPRING_DATA_REDIS_DATABASE: 0
+      # AI 模型配置（从 .env 注入）
+      LANGFORCHAIN4J_OPEN_AI_CHAT_MODEL_API_KEY: ${LLM_API_KEY:-<Your API Key>}
+      LANGFORCHAIN4J_OPEN_AI_STREAMING_CHAT_MODEL_API_KEY: ${LLM_API_KEY:-<Your API Key>}
+      LANGFORCHAIN4J_OPEN_AI_REASONING_STREAMING_CHAT_MODEL_API_KEY: ${LLM_API_KEY:-<Your API Key>}
+      LANGFORCHAIN4J_OPEN_AI_ROUTING_CHAT_MODEL_API_KEY: ${LLM_API_KEY:-<Your API Key>}
+      LANGFORCHAIN4J_OPEN_AI_CHAT_MODEL_BASE_URL: ${LLM_BASE_URL:-https://api.deepseek.com}
+      LANGFORCHAIN4J_OPEN_AI_STREAMING_CHAT_MODEL_BASE_URL: ${LLM_BASE_URL:-https://api.deepseek.com}
+      LANGFORCHAIN4J_OPEN_AI_REASONING_STREAMING_CHAT_MODEL_BASE_URL: ${LLM_BASE_URL:-https://api.deepseek.com}
+      LANGFORCHAIN4J_OPEN_AI_ROUTING_CHAT_MODEL_BASE_URL: ${LLM_BASE_URL:-https://api.deepseek.com}
+      # 沙箱配置
+      SANDBOX_ENABLED: "true"
+      SANDBOX_IMAGE: code-sandbox:latest
+      # 主服务在 compose 容器内，访问宿主机动态沙箱容器用 host.docker.internal
+      SANDBOX_HOST: host.docker.internal
+      # 沙箱专用中间件（宿主机端口映射，供沙箱容器内后端连接）
+      SANDBOX_MYSQL_HOST: host.docker.internal
+      SANDBOX_MYSQL_PORT: 3307
+      SANDBOX_MYSQL_USER: root
+      SANDBOX_MYSQL_PASSWORD: ${SANDBOX_MYSQL_PASSWORD:-123456}
+      SANDBOX_REDIS_HOST: host.docker.internal
+      SANDBOX_REDIS_PORT: 6380
+      # 构建/部署路径
+      CODE_DEPLOY_HOST: http://localhost
+    ports:
+      - "${BACKEND_PORT:-8123}:8123"
+    volumes:
+      # 挂载 docker sock：让主服务用 docker CLI 管理沙箱 sidecar 容器
+      - /var/run/docker.sock:/var/run/docker.sock
+      # 代码输出/部署目录，与宿主机共享（沙箱容器卷挂载基于它）
+      - ${CODE_OUTPUT_DIR:-./tmp/code_output}:/app/tmp/code_output
+      - ${CODE_DEPLOY_DIR:-./tmp/code_deploy}:/app/tmp/code_deploy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - codegen
+
+  # ===== 前端 =====
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/frontend.Dockerfile
+    container_name: yu-ai-code-mother-frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-8080}:80"
+    depends_on:
+      - backend
+    networks:
+      - codegen
+
+volumes:
+  platform_mysql_data:
+  platform_redis_data:
+  sandbox_mysql_data:
+  sandbox_redis_data:
+
+networks:
+  codegen:
+    driver: bridge

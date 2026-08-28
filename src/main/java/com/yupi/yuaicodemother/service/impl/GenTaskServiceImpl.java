@@ -11,6 +11,7 @@ import com.yupi.yuaicodemother.model.entity.App;
 import com.yupi.yuaicodemother.model.entity.GenTask;
 import com.yupi.yuaicodemother.model.entity.User;
 import com.yupi.yuaicodemother.model.enums.GenTaskStatusEnum;
+import com.yupi.yuaicodemother.model.enums.CodeGenTypeEnum;
 import com.yupi.yuaicodemother.service.AppService;
 import com.yupi.yuaicodemother.service.GenTaskService;
 import jakarta.annotation.Resource;
@@ -38,6 +39,12 @@ public class GenTaskServiceImpl extends ServiceImpl<GenTaskMapper, GenTask> impl
     @Override
     @Transactional(rollbackFor = Exception.class)
     public GenTask createTask(Long appId, String message, User loginUser) {
+        return createTask(appId, message, null, loginUser);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public GenTask createTask(Long appId, String message, String codeGenType, User loginUser) {
         // 参数校验
         ThrowUtils.throwIf(StrUtil.isBlank(message), ErrorCode.PARAMS_ERROR, "消息不能为空");
         ThrowUtils.throwIf(loginUser == null, ErrorCode.NOT_LOGIN_ERROR);
@@ -51,6 +58,16 @@ public class GenTaskServiceImpl extends ServiceImpl<GenTaskMapper, GenTask> impl
             appAddRequest.setInitPrompt(message);
             appId = appService.createApp(appAddRequest, loginUser);
             app = appService.getById(appId);
+
+            // 用户手动选择了代码生成类型，则覆盖 AI 路由结果
+            if (StrUtil.isNotBlank(codeGenType)
+                    && CodeGenTypeEnum.getEnumByValue(codeGenType) != null) {
+                App updateApp = new App();
+                updateApp.setId(appId);
+                updateApp.setCodeGenType(codeGenType);
+                appService.updateById(updateApp);
+                app = appService.getById(appId);
+            }
         } else {
             // 查询已有应用信息
             app = appService.getById(appId);
@@ -135,6 +152,17 @@ public class GenTaskServiceImpl extends ServiceImpl<GenTaskMapper, GenTask> impl
         updateTask.setUpdateTime(LocalDateTime.now());
         this.updateById(updateTask);
         log.info("任务 {} 开始执行", taskId);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void markTaskSandboxBuilding(Long taskId) {
+        GenTask updateTask = new GenTask();
+        updateTask.setId(taskId);
+        updateTask.setStatus(GenTaskStatusEnum.SANDBOX_BUILDING.getValue());
+        updateTask.setUpdateTime(LocalDateTime.now());
+        this.updateById(updateTask);
+        log.info("任务 {} 沙箱搭建中", taskId);
     }
 
     @Override

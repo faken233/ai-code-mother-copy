@@ -18,6 +18,7 @@ import com.yupi.yuaicodemother.service.ChatHistoryService;
 import com.yupi.yuaicodemother.service.GenTaskService;
 import com.yupi.yuaicodemother.service.UserService;
 import com.yupi.yuaicodemother.sse.SseConnectionManager;
+import com.yupi.yuaicodemother.sandbox.SandboxContainerManager;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import jakarta.annotation.Resource;
@@ -83,6 +84,9 @@ public class GenTaskExecutor {
 
     @Resource
     private StreamHandlerExecutor streamHandlerExecutor;
+
+    @Resource
+    private SandboxContainerManager sandboxContainerManager;
 
     /**
      * 调度线程池（用于轮询任务队列和清理超时任务）
@@ -181,13 +185,7 @@ public class GenTaskExecutor {
             try {
                 log.info("开始执行任务: taskId={}, appId={}, userId={}", taskId, appId, userId);
 
-                // 更新任务状态为运行中
-                genTaskService.markTaskRunning(taskId);
-
-                // 通知 SSE 连接任务开始执行
-                sseConnectionManager.sendTaskStatus(taskId, GenTaskStatusEnum.RUNNING.getValue(), 0);
-
-                // 获取应用和用户信息
+                // 获取应用和用户信息（先于沙箱搭建，需要 codeGenType 判断是否全栈）
                 App app = appService.getById(appId);
                 User user = userService.getById(userId);
 
@@ -200,6 +198,19 @@ public class GenTaskExecutor {
                 if (codeGenTypeEnum == null) {
                     throw new RuntimeException("无效的代码生成类型");
                 }
+
+                // 全栈项目：先显式搭建沙箱（用户可见阶段：沙箱搭建中）
+                if (codeGenTypeEnum == CodeGenTypeEnum.FULLSTACK) {
+                    genTaskService.markTaskSandboxBuilding(taskId);
+                    sseConnectionManager.sendTaskStatus(taskId, GenTaskStatusEnum.SANDBOX_BUILDING.getValue(), 0);
+                    log.info("任务 {} 进入沙箱搭建阶段，开始搭建沙箱", taskId);
+                    sandboxContainerManager.ensureContainer(appId);
+                    log.info("任务 {} 沙箱搭建完成，开始代码生成", taskId);
+                }
+
+                // 更新任务状态为运行中（代码生成中）
+                genTaskService.markTaskRunning(taskId);
+                sseConnectionManager.sendTaskStatus(taskId, GenTaskStatusEnum.RUNNING.getValue(), 0);
 
                 // 保存用户消息到对话历史
                 chatHistoryService.addChatMessage(appId, task.getMessage(), ChatHistoryMessageTypeEnum.USER.getValue(), userId);
@@ -239,8 +250,8 @@ public class GenTaskExecutor {
                 StringBuilder contentBuilder = new StringBuilder();
 
                 return processedStream.doOnNext(chunk -> {
-                    // 根据消息类型分发到不同 SSE 事件
-                    sendStreamChunk(taskId, chunk, contentBuilder);
+                    // 根据消息类型分发到不同 SSE 事件（工具块会额外持久化为 tool_call 历史）
+                    sendStreamChunk(taskId, chunk, contentBuilder, appId, userId);
                 }).doOnComplete(() -> {
                     // 保存剩余内容
                     if (!contentBuilder.isEmpty()) {
@@ -278,7 +289,7 @@ public class GenTaskExecutor {
      * @param chunk          结构化 JSON 消息块
      * @param contentBuilder 正文累积器（用于持久化）
      */
-    private void sendStreamChunk(Long taskId, String chunk, StringBuilder contentBuilder) {
+    private void sendStreamChunk(Long taskId, String chunk, StringBuilder contentBuilder, Long appId, Long userId) {
         try {
             JSONObject json = JSONUtil.parseObj(chunk);
             String type = json.getStr("type");
@@ -299,14 +310,15 @@ public class GenTaskExecutor {
                     sseConnectionManager.sendChunk(taskId, data);
                     appendContent(contentBuilder, taskId, data);
                 }
-                case THINKING -> {
-                    sseConnectionManager.sendEvent(taskId, "thinking", chunk);
-                }
-                case TOOL_REQUEST -> {
-                    sseConnectionManager.sendEvent(taskId, "tool_request", chunk);
-                }
                 case TOOL_EXECUTED -> {
+                    // 工具执行完毕：只发一个 tool_executed 事件，前端用一个块展示（含完成标记）
                     sseConnectionManager.sendEvent(taskId, "tool_executed", chunk);
+                    // 额外持久化工具块（摘要+结果），供历史还原
+                    persistToolCall(chunk, appId, userId);
+                }
+                case THINKING, TOOL_REQUEST -> {
+                    // 思考块和独立的工具请求块已不再传输前端，仅记录日志
+                    log.debug("忽略不传输的消息类型: {}", type);
                 }
                 default -> {
                     log.warn("未知消息类型: {}", type);
@@ -316,6 +328,25 @@ public class GenTaskExecutor {
             log.warn("解析流式消息失败，按正文处理。taskId: {}, error: {}", taskId, e.getMessage());
             sseConnectionManager.sendChunk(taskId, chunk);
             appendContent(contentBuilder, taskId, chunk);
+        }
+    }
+
+    /**
+     * 持久化工具调用块（messageType=tool_call）。
+     * 只存摘要和结果，不存完整参数（避免大段文件内容占用存储）。
+     */
+    private void persistToolCall(String chunk, Long appId, Long userId) {
+        try {
+            JSONObject json = JSONUtil.parseObj(chunk);
+            JSONObject persisted = new JSONObject();
+            persisted.set("name", json.getStr("name"));
+            persisted.set("displayName", json.getStr("displayName"));
+            persisted.set("summary", json.getStr("summary"));
+            persisted.set("result", json.getStr("result"));
+            persisted.set("status", "completed");
+            chatHistoryService.addChatMessage(appId, persisted.toString(), ChatHistoryMessageTypeEnum.TOOL_CALL.getValue(), userId);
+        } catch (Exception e) {
+            log.warn("持久化工具调用块失败, appId: {}, error: {}", appId, e.getMessage());
         }
     }
 

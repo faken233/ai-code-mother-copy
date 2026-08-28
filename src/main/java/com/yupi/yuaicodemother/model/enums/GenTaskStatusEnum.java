@@ -11,6 +11,7 @@ import lombok.Getter;
 public enum GenTaskStatusEnum {
 
     PENDING("pending", "排队中"),
+    SANDBOX_BUILDING("sandbox_building", "沙箱搭建中"),
     RUNNING("running", "执行中"),
     COMPLETED("completed", "已完成"),
     FAILED("failed", "失败"),

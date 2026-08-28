@@ -132,3 +132,33 @@ gen-task:
   max-retries: 3
   # 重试基础延迟（毫秒），指数退避
   retry-base-delay-ms: 3000
+# Docker 代码沙箱配置
+sandbox:
+  # 是否启用沙箱（默认开启 docker 模式，无 docker 环境时可改为 false 降级本地直写）
+  enabled: true
+  # 沙箱镜像名
+  image: code-sandbox:latest
+  # 工作区根目录（宿主机）
+  workspace-root: ${user.dir}/tmp/code_output
+  # 预览端口范围起（映射容器内 node 文件服务 8080）
+  preview-port-range-start: 18080
+  # 预览端口范围内偏移上限
+  preview-port-range-size: 1000
+  # 沙箱容器内 HTTP 服务（node 文件服务）端口
+  container-port: 8080
+  # 沙箱容器内 Spring Boot 后端端口
+  container-backend-port: 8081
+  # 映射到宿主机的后端端口范围起（反代到容器内后端）
+  backend-port-range-start: 19080
+  # 主服务访问沙箱容器的地址（本地直跑=localhost，compose 内=host.docker.internal）
+  host: localhost
+  # 沙箱专用 MySQL 主机（供沙箱内后端连接，与平台物理隔离）
+  mysql-host: host.docker.internal
+  mysql-port: 3307
+  # 沙箱专用 Redis 主机（供沙箱内后端连接，与平台物理隔离）
+  redis-host: host.docker.internal
+  redis-port: 6380
+  # MySQL root 用户
+  mysql-user: root
+  # MySQL root 密码（仅用于沙箱内建库）
+  mysql-password: 123456

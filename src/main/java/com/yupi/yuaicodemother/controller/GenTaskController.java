@@ -67,8 +67,8 @@ public class GenTaskController {
         // 获取当前登录用户
         User loginUser = userService.getLoginUser(request);
 
-        // 创建任务
-        GenTask task = genTaskService.createTask(createRequest.getAppId(), createRequest.getMessage(), loginUser);
+        // 创建任务（支持用户手动选择代码生成类型，覆盖 AI 路由结果）
+        GenTask task = genTaskService.createTask(createRequest.getAppId(), createRequest.getMessage(), createRequest.getCodeGenType(), loginUser);
 
         // 获取队列位置
         int queuePosition = genTaskService.getQueuePosition(task.getId());

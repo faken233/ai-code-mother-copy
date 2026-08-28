@@ -90,6 +90,10 @@ public class ProjectDownloadServiceImpl implements ProjectDownloadService {
             if (IGNORED_NAMES.contains(partName)) {
                 return false;
             }
+            // 【FULLSTACK】排除沙箱相关文件/目录（平台内部实现，不进用户包）
+            if (partName.toLowerCase().contains("sandbox")) {
+                return false;
+            }
             // 检查是否以忽略扩展名结尾
             if (IGNORED_EXTENSIONS.stream().anyMatch(ext -> partName.toLowerCase().endsWith(ext))) {
                 return false;

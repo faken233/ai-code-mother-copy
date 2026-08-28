@@ -2,6 +2,10 @@
 application-local.yml
 application-prod.yml
 tmp
+# compose 注入的密钥环境变量（本机 .env）
+.env
+# 前端构建产物
+yu-ai-code-mother-frontend/dist/
 
 HELP.md
 target/

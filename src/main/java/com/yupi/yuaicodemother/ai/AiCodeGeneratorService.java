@@ -54,4 +54,13 @@ public interface AiCodeGeneratorService {
      */
     @SystemMessage(fromResource = "prompt/codegen-vue-project-system-prompt.txt")
     TokenStream generateVueProjectCodeStream(@MemoryId long appId, @UserMessage String userMessage);
+
+    /**
+     * 生成全栈项目代码（流式，Vue3 前端 + Spring Boot 3 后端）
+     *
+     * @param userMessage 用户提示词
+     * @return AI 的输出结果
+     */
+    @SystemMessage(fromResource = "prompt/codegen-fullstack-system-prompt.txt")
+    TokenStream generateFullstackProjectCodeStream(@MemoryId long appId, @UserMessage String userMessage);
 }

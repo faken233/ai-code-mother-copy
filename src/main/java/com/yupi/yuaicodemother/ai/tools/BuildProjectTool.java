@@ -1,12 +1,13 @@
 package com.yupi.yuaicodemother.ai.tools;
 
 import cn.hutool.json.JSONObject;
-import com.yupi.yuaicodemother.constant.AppConstant;
 import dev.langchain4j.agent.tool.P;
 import dev.langchain4j.agent.tool.Tool;
 import dev.langchain4j.agent.tool.ToolMemoryId;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
+
+import jakarta.annotation.Resource;
 
 import java.io.BufferedReader;
 import java.io.File;
@@ -17,11 +18,17 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * 项目构建工具
- * 支持 AI 调用来构建 Vue 项目，如果构建失败会返回错误信息给 AI 进行修复
+ * 支持 AI 调用来构建 Vue 前端或 Spring Boot 后端项目，如果构建失败会返回错误信息给 AI 进行修复
  */
 @Slf4j
 @Component
 public class BuildProjectTool extends BaseTool {
+
+    @Resource
+    private ProjectPathResolver projectPathResolver;
+
+    @Resource
+    private com.yupi.yuaicodemother.sandbox.SandboxClient sandboxClient;
 
     /**
      * npm install 超时时间（秒）
@@ -34,19 +41,25 @@ public class BuildProjectTool extends BaseTool {
     private static final int NPM_BUILD_TIMEOUT = 180;
 
     /**
+     * mvn compile 超时时间（秒）
+     */
+    private static final int MVN_BUILD_TIMEOUT = 300;
+
+    /**
      * 最大错误输出长度（字符数）
      */
     private static final int MAX_ERROR_LENGTH = 4000;
 
-    @Tool("构建 Vue 项目，执行 npm install 和 npm run build。如果构建失败，会返回详细的错误信息，你需要根据错误信息修复代码后重新调用此工具。")
+    @Tool("构建项目。scope 为 frontend 时构建前端（npm install + npm run build）；scope 为 backend 时构建后端（mvn compile）。不传则根据项目目录自动探测。如果构建失败，会返回详细的错误信息，你需要根据错误信息修复代码后重新调用此工具。")
     public String buildProject(
-            @P("是否跳过 npm install 步骤，如果之前已经安装过依赖且只是修改代码，可以设置为 true 加快构建速度")
+            @P("构建范围：frontend（前端）/ backend（后端），可选，缺省自动探测")
+            String scope,
+            @P("是否跳过依赖安装步骤，如果之前已经安装过依赖且只是修改代码，可以设置为 true 加快构建速度")
             boolean skipInstall,
             @ToolMemoryId Long appId
     ) {
-        // 构建项目路径
-        String projectDirName = "vue_project_" + appId;
-        String projectPath = Paths.get(AppConstant.CODE_OUTPUT_ROOT_DIR, projectDirName).toString();
+        // 构建项目路径（按 codeGenType 自动适配）
+        String projectPath = projectPathResolver.resolveProjectRoot(appId).toString();
         File projectDir = new File(projectPath);
 
         // 检查项目目录
@@ -54,23 +67,44 @@ public class BuildProjectTool extends BaseTool {
             return "❌ 构建失败：项目目录不存在 - " + projectPath;
         }
 
-        // 检查 package.json
-        File packageJsonFile = new File(projectDir, "package.json");
-        if (!packageJsonFile.exists()) {
-            return "❌ 构建失败：项目目录中没有 package.json 文件，请先创建 package.json";
+        // 自动探测构建范围
+        String effectiveScope = scope;
+        if (effectiveScope == null || effectiveScope.isBlank()) {
+            if (new File(projectDir, "package.json").exists() || new File(projectDir, "frontend").exists()) {
+                effectiveScope = "frontend";
+            } else {
+                effectiveScope = "backend";
+            }
         }
 
-        log.info("开始构建 Vue 项目：{}", projectPath);
-        StringBuilder resultBuilder = new StringBuilder();
+        if ("frontend".equals(effectiveScope)) {
+            return buildFrontend(projectDir, skipInstall, appId);
+        } else if ("backend".equals(effectiveScope)) {
+            return buildBackend(projectDir, appId);
+        } else {
+            return "❌ 构建失败：未知的构建范围 - " + scope;
+        }
+    }
 
+    /**
+     * 构建前端项目
+     */
+    private String buildFrontend(File projectDir, boolean skipInstall, Long appId) {
+        File frontendDir = new File(projectDir, "frontend");
+        if (new File(projectDir, "package.json").exists()) {
+            // 项目根目录即前端
+            frontendDir = projectDir;
+        }
+        if (!new File(frontendDir, "package.json").exists()) {
+            return "❌ 构建失败：项目目录中没有 package.json 文件，请先创建前端 package.json";
+        }
+
+        StringBuilder resultBuilder = new StringBuilder();
         // 执行 npm install（可选跳过）
         if (!skipInstall) {
-            log.info("执行 npm install...");
-            CommandResult installResult = executeCommand(projectDir, buildCommand("npm") + " install", NPM_INSTALL_TIMEOUT);
+            CommandResult installResult = executeCommand(frontendDir, buildCommand("npm") + " install", NPM_INSTALL_TIMEOUT, appId);
             if (!installResult.success) {
-                String errorMsg = formatBuildError("npm install", installResult);
-                log.error("npm install 执行失败：{}", errorMsg);
-                return errorMsg;
+                return formatBuildError("npm install", installResult);
             }
             resultBuilder.append("✅ npm install 成功\n");
         } else {
@@ -78,23 +112,45 @@ public class BuildProjectTool extends BaseTool {
         }
 
         // 执行 npm run build
-        log.info("执行 npm run build...");
-        CommandResult buildResult = executeCommand(projectDir, buildCommand("npm") + " run build", NPM_BUILD_TIMEOUT);
+        CommandResult buildResult = executeCommand(frontendDir, buildCommand("npm") + " run build", NPM_BUILD_TIMEOUT, appId);
         if (!buildResult.success) {
-            String errorMsg = formatBuildError("npm run build", buildResult);
-            log.error("npm run build 执行失败：{}", errorMsg);
-            return errorMsg;
+            return formatBuildError("npm run build", buildResult);
         }
         resultBuilder.append("✅ npm run build 成功\n");
 
         // 验证 dist 目录
-        File distDir = new File(projectDir, "dist");
+        File distDir = new File(frontendDir, "dist");
         if (!distDir.exists() || !distDir.isDirectory()) {
             return "❌ 构建失败：构建完成但 dist 目录未生成，请检查 vite.config.js 或 vue.config.js 配置";
         }
 
-        resultBuilder.append("✅ Vue 项目构建成功，dist 目录已生成");
-        log.info("Vue 项目构建成功：{}", projectPath);
+        resultBuilder.append("✅ 前端构建成功，dist 目录已生成");
+        log.info("前端构建成功：{}", frontendDir.getPath());
+        return resultBuilder.toString();
+    }
+
+    /**
+     * 构建后端项目
+     */
+    private String buildBackend(File projectDir, Long appId) {
+        File backendDir = new File(projectDir, "backend");
+        if (new File(projectDir, "pom.xml").exists()) {
+            // 项目根目录即后端
+            backendDir = projectDir;
+        }
+        if (!new File(backendDir, "pom.xml").exists()) {
+            return "❌ 构建失败：项目目录中没有 pom.xml 文件，请先创建后端 pom.xml";
+        }
+
+        StringBuilder resultBuilder = new StringBuilder();
+        // 执行 mvn -q compile
+        CommandResult compileResult = executeCommand(backendDir, buildCommand("mvn") + " -q compile", MVN_BUILD_TIMEOUT, appId);
+        if (!compileResult.success) {
+            return formatBuildError("mvn compile", compileResult);
+        }
+        resultBuilder.append("✅ mvn compile 成功\n");
+        resultBuilder.append("✅ 后端编译通过");
+        log.info("后端编译通过：{}", backendDir.getPath());
         return resultBuilder.toString();
     }
 
@@ -168,14 +224,36 @@ public class BuildProjectTool extends BaseTool {
      * @param workingDir     工作目录
      * @param command        命令字符串
      * @param timeoutSeconds 超时时间（秒）
+     * @param appId          应用 ID（用于沙箱路由）
      * @return 命令执行结果
      */
-    private CommandResult executeCommand(File workingDir, String command, int timeoutSeconds) {
+    private CommandResult executeCommand(File workingDir, String command, int timeoutSeconds, Long appId) {
         CommandResult result = new CommandResult();
         Process process = null;
 
         try {
             log.info("在目录 {} 中执行命令: {}", workingDir.getAbsolutePath(), command);
+
+            // 沙箱启用时，走沙箱 exec（容器内执行 npm/mvn）
+            if (sandboxClient.isEnabled()) {
+                String[] parts = command.split("\\s+");
+                String cmd = parts[0];
+                java.util.List<String> args = new java.util.ArrayList<>();
+                for (int i = 1; i < parts.length; i++) {
+                    args.add(parts[i]);
+                }
+                String cwd = workingDir.getName().equals("frontend") || workingDir.getName().equals("backend")
+                        ? workingDir.getName()
+                        : "";
+                com.yupi.yuaicodemother.sandbox.SandboxClient.CommandResult sandboxResult =
+                        sandboxClient.exec(cmd, args, cwd, timeoutSeconds * 1000, appId);
+                result.success = sandboxResult.success;
+                result.timeout = sandboxResult.timedOut;
+                result.exitCode = sandboxResult.exitCode;
+                result.stdout = sandboxResult.stdout;
+                result.stderr = sandboxResult.stderr;
+                return result;
+            }
 
             ProcessBuilder processBuilder = new ProcessBuilder();
             processBuilder.directory(workingDir);
@@ -285,6 +363,10 @@ public class BuildProjectTool extends BaseTool {
     @Override
     public String generateToolExecutedResult(JSONObject arguments) {
         boolean skipInstall = arguments.getBool("skipInstall", false);
-        return String.format("[工具调用] %s (skipInstall=%s)", getDisplayName(), skipInstall);
+        String scope = arguments.getStr("scope");
+        if (scope == null) {
+            scope = "auto";
+        }
+        return String.format("[工具调用] %s (scope=%s, skipInstall=%s)", getDisplayName(), scope, skipInstall);
     }
 }

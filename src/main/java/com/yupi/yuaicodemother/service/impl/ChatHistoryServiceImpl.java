@@ -108,6 +108,10 @@ public class ChatHistoryServiceImpl extends ServiceImpl<ChatHistoryMapper, ChatH
             // 先清理历史缓存，防止重复加载
             chatMemory.clear();
             for (ChatHistory history : historyList) {
+                // 跳过工具调用块（tool_call），避免工具明细污染 AI 上下文
+                if (ChatHistoryMessageTypeEnum.TOOL_CALL.getValue().equals(history.getMessageType())) {
+                    continue;
+                }
                 if (ChatHistoryMessageTypeEnum.USER.getValue().equals(history.getMessageType())) {
                     chatMemory.add(UserMessage.from(history.getMessage()));
                 } else if (ChatHistoryMessageTypeEnum.AI.getValue().equals(history.getMessageType())) {

@@ -16,15 +16,18 @@ import com.yupi.yuaicodemother.exception.ErrorCode;
 import com.yupi.yuaicodemother.exception.ThrowUtils;
 import com.yupi.yuaicodemother.model.dto.app.*;
 import com.yupi.yuaicodemother.model.entity.User;
+import com.yupi.yuaicodemother.model.enums.CodeGenTypeEnum;
 import com.yupi.yuaicodemother.model.vo.AppVO;
 import com.yupi.yuaicodemother.ratelimter.annotation.RateLimit;
 import com.yupi.yuaicodemother.ratelimter.enums.RateLimitType;
+import com.yupi.yuaicodemother.sandbox.PreviewService;
 import com.yupi.yuaicodemother.service.ProjectDownloadService;
 import com.yupi.yuaicodemother.service.UserService;
 import jakarta.annotation.Resource;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.cache.annotation.Cacheable;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.MediaType;
 import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.web.bind.annotation.*;
@@ -56,6 +59,37 @@ public class AppController {
     @Resource
     private ProjectDownloadService projectDownloadService;
 
+    @Resource
+    private PreviewService previewService;
+
+    @Value("${code.deploy-host:http://localhost}")
+    private String deployHost;
+
+    /**
+     * 全栈项目预览（沙箱内拉起后端）
+     *
+     * @param appId   应用 ID
+     * @param request 请求
+     * @return 预览地址
+     */
+    @PostMapping("/preview/{appId}")
+    public BaseResponse<String> previewApp(@PathVariable Long appId, HttpServletRequest request) {
+        ThrowUtils.throwIf(appId == null || appId <= 0, ErrorCode.PARAMS_ERROR, "应用 ID 错误");
+        User loginUser = userService.getLoginUser(request);
+        App app = appService.getById(appId);
+        ThrowUtils.throwIf(app == null, ErrorCode.NOT_FOUND_ERROR, "应用不存在");
+        if (!app.getUserId().equals(loginUser.getId())) {
+            throw new BusinessException(ErrorCode.NO_AUTH_ERROR, "无权限预览该应用");
+        }
+        // 仅支持全栈项目预览
+        ThrowUtils.throwIf(!CodeGenTypeEnum.FULLSTACK.getValue().equals(app.getCodeGenType()),
+                ErrorCode.PARAMS_ERROR, "仅全栈项目支持沙箱预览");
+        previewService.startPreview(appId);
+        // 预览地址：静态前端 + /api/** 反代均经 PreviewProxyController 处理（URL 带 appId，只存在于预览编排层）
+        // 用户下载源码后走 /（相对 api 路径），不经此控制器，零隔离痕迹
+        String previewUrl = String.format("%s/api/preview/%d/", deployHost, appId);
+        return ResultUtils.success(previewUrl);
+    }
     /**
      * 通过对话生成代码（SSE 流式返回）
      * <p>
