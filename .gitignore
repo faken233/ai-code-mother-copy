@@ -40,3 +40,15 @@ build/
 
 ### VS Code ###
 .vscode/
+
+# 平台模板依赖缓存（预热用，不入库）
+templates/node-unified/.cache/
+
+# proxy 模块的独立 Maven 本地仓库（沙箱内 ~/.m2 不可写时使用）
+.m2repo/
+
+# macOS 文件系统元数据
+.DS_Store
+
+# 本地 AI 工具目录
+.commandcode/

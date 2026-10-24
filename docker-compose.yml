@@ -104,29 +104,34 @@ services:
       platform-redis:
         condition: service_healthy
     environment:
-      SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE:-local}
+      # 容器内后端监听 8123，与本地开发保持一致
+      SERVER_PORT: "8123"
       # 平台数据源：连 compose 内的 platform-mysql（服务名）
       SPRING_DATASOURCE_URL: jdbc:mysql://platform-mysql:3306/yu_ai_code_mother?useUnicode=true&characterEncoding=UTF-8&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Shanghai
-      SPRING_DATASOURCE_USERNAME: root
-      SPRING_DATASOURCE_PASSWORD: ${PLATFORM_MYSQL_PASSWORD:-123456}
+      SPRING_DATASOURCE_USERNAME: ${MYSQL_USERNAME:-root}
+      SPRING_DATASOURCE_PASSWORD: ${MYSQL_PASSWORD:-123456}
       # 平台 Redis：连 compose 内的 platform-redis
       SPRING_DATA_REDIS_HOST: platform-redis
       SPRING_DATA_REDIS_PORT: 6379
       SPRING_DATA_REDIS_DATABASE: 0
-      # AI 模型配置（从 .env 注入）
-      LANGFORCHAIN4J_OPEN_AI_CHAT_MODEL_API_KEY: ${LLM_API_KEY:-<Your API Key>}
-      LANGFORCHAIN4J_OPEN_AI_STREAMING_CHAT_MODEL_API_KEY: ${LLM_API_KEY:-<Your API Key>}
-      LANGFORCHAIN4J_OPEN_AI_REASONING_STREAMING_CHAT_MODEL_API_KEY: ${LLM_API_KEY:-<Your API Key>}
-      LANGFORCHAIN4J_OPEN_AI_ROUTING_CHAT_MODEL_API_KEY: ${LLM_API_KEY:-<Your API Key>}
-      LANGFORCHAIN4J_OPEN_AI_CHAT_MODEL_BASE_URL: ${LLM_BASE_URL:-https://api.deepseek.com}
-      LANGFORCHAIN4J_OPEN_AI_STREAMING_CHAT_MODEL_BASE_URL: ${LLM_BASE_URL:-https://api.deepseek.com}
-      LANGFORCHAIN4J_OPEN_AI_REASONING_STREAMING_CHAT_MODEL_BASE_URL: ${LLM_BASE_URL:-https://api.deepseek.com}
-      LANGFORCHAIN4J_OPEN_AI_ROUTING_CHAT_MODEL_BASE_URL: ${LLM_BASE_URL:-https://api.deepseek.com}
+      # AI 模型配置（唯一数据源 = .env 的 LLM_*，经 application.yml 的 ${LLM_*} 占位符注入）
+      # langchain4j starter 自动装配的 openAiChatModel / openAiStreamingChatModel 读 yml 段，
+      # 自定义 RoutingAiModelConfig 也读 yml 段 —— 全部走 LLM_* 这一条链路
+      LLM_API_KEY: ${LLM_API_KEY:-<Your API Key>}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.deepseek.com}
+      LLM_CHAT_MODEL: ${LLM_CHAT_MODEL:-deepseek-flash}
+      LLM_STREAMING_MODEL: ${LLM_STREAMING_MODEL:-deepseek-flash}
+      LLM_ROUTING_MODEL: ${LLM_ROUTING_MODEL:-deepseek-flash}
+      LLM_ROUTING_BASE_URL: ${LLM_ROUTING_BASE_URL:-https://api.deepseek.com}
+      LLM_REASONING_EFFORT: ${LLM_REASONING_EFFORT:-low}
       # 沙箱配置
       SANDBOX_ENABLED: "true"
       SANDBOX_IMAGE: code-sandbox:latest
       # 主服务在 compose 容器内，访问宿主机动态沙箱容器用 host.docker.internal
       SANDBOX_HOST: host.docker.internal
+      # 宿主机侧工作区绝对路径（docker run -v 挂载源）：容器内 user.dir=/app 不是宿主机路径，
+      # 必须在宿主机可见的真实路径，docker CLI 才能挂载。${PWD} 取 compose 所在目录（deploy.sh 会先 cd 到仓库根）。
+      SANDBOX_WORKSPACE_HOST_DIR: ${PWD}/tmp/code_output
       # 沙箱专用中间件（宿主机端口映射，供沙箱容器内后端连接）
       SANDBOX_MYSQL_HOST: host.docker.internal
       SANDBOX_MYSQL_PORT: 3307

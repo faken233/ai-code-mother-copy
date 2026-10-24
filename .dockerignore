@@ -1,0 +1,34 @@
+# Docker 构建上下文排除（防止敏感配置/密钥进入镜像）
+# 这些文件在 gitignore 中已排除，但 gitignore 不影响 docker build，
+# 必须在此显式排除，避免 COPY src ./src 时把真实密钥打进镜像。
+
+# 本地/生产配置文件（含真实 API key、数据库密码、云厂商密钥）
+src/main/resources/application-local.yml
+src/main/resources/application-prod.yml
+src/main/resources/application-prod-sample.yml
+
+# 环境变量文件（含真实密钥）
+.env
+.env.*
+
+# 构建产物与临时目录
+target/
+tmp/
+**/node_modules/
+**/dist/
+
+# 版本控制与编辑器
+.git
+.gitignore
+.idea
+.vscode
+*.iml
+
+# macOS
+.DS_Store
+
+# 工具目录
+.commandcode/
+
+# 任务笔记等非业务文件
+提示词.md
