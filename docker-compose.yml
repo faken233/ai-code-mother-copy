@@ -1,16 +1,15 @@
-version: "3.9"
-
 # 代码生成系统一键部署（全栈）
 # 服务清单：
 #   platform-mysql  平台主库    -> 宿主机 3306
 #   platform-redis  平台缓存/限流 -> 宿主机 6379
 #   sandbox-mysql   沙箱项目库   -> 宿主机 3307（物理隔离）
 #   sandbox-redis   沙箱项目缓存 -> 宿主机 6380（物理隔离）
-#   backend         主服务 Spring Boot
-#   frontend        前端 nginx
+#   backend         主服务 Spring Boot           -> 宿主机 8123
+#   proxy           访问入口代理（预览/部署域名） -> 宿主机 8124
+#   frontend        前端 nginx                    -> 宿主机 8080
 #
 # 沙箱容器（code-sandbox）由主服务通过 docker.sock 按 appId 动态拉起，
-# 端口绑定在宿主机（18080+ / 19080+），不在此 compose 中声明。
+# 宿主端口随机分配（工具通道 + 应用通道），不在此 compose 中声明。
 
 services:
   # ===== 平台中间件 =====
@@ -139,8 +138,16 @@ services:
       SANDBOX_MYSQL_PASSWORD: ${SANDBOX_MYSQL_PASSWORD:-123456}
       SANDBOX_REDIS_HOST: host.docker.internal
       SANDBOX_REDIS_PORT: 6380
-      # 构建/部署路径
-      CODE_DEPLOY_HOST: http://localhost
+      # 生成应用的访问入口（与 proxy 端口一致）：
+      #   预览 http://{code}.pv.localhost:8124/
+      #   部署 http://{deployKey}.app.localhost:8124/
+      # 主服务只负责把这两个地址返回给前端，实际转发由 proxy 完成。
+      CODE_PREVIEW_SCHEME: ${CODE_PREVIEW_SCHEME:-http}
+      CODE_PREVIEW_HOST_SUFFIX: ${CODE_PREVIEW_HOST_SUFFIX:-pv.localhost}
+      CODE_PREVIEW_PORT: ${PROXY_PORT:-8124}
+      CODE_DEPLOY_SCHEME: ${CODE_DEPLOY_SCHEME:-http}
+      CODE_DEPLOY_HOST_SUFFIX: ${CODE_DEPLOY_HOST_SUFFIX:-app.localhost}
+      CODE_DEPLOY_PORT: ${PROXY_PORT:-8124}
     ports:
       - "${BACKEND_PORT:-8123}:8123"
     volumes:
@@ -149,6 +156,36 @@ services:
       # 代码输出/部署目录，与宿主机共享（沙箱容器卷挂载基于它）
       - ${CODE_OUTPUT_DIR:-./tmp/code_output}:/app/tmp/code_output
       - ${CODE_DEPLOY_DIR:-./tmp/code_deploy}:/app/tmp/code_deploy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - codegen
+
+  # ===== 访问入口代理（预览 / 部署域名）=====
+  # 按 Host 从 Redis 读路由，流式转发到沙箱容器；主服务不参与数据通路。
+  # 注意 upstream 由主服务写入（SANDBOX_HOST=host.docker.internal），
+  # 因此这里必须能解析 host.docker.internal —— Docker Desktop 直接可用，
+  # Linux 下由 host-gateway 兜底（沙箱端口若只绑 127.0.0.1 则需放开绑定地址）。
+  proxy:
+    build:
+      context: .
+      dockerfile: docker/proxy.Dockerfile
+    image: yu-ai-code-mother-proxy:latest
+    container_name: yu-ai-code-mother-proxy
+    restart: unless-stopped
+    depends_on:
+      platform-redis:
+        condition: service_healthy
+    environment:
+      PROXY_PORT: "8124"
+      # 与主服务共用平台 Redis（服务名），路由由主服务写入、代理只读
+      REDIS_HOST: platform-redis
+      REDIS_PORT: "6379"
+      REDIS_DATABASE: "0"
+      # echo/dead 自检别名只服务宿主机本地验收，容器内没有对端，关闭
+      PROXY_SELFTEST_ENABLED: "false"
+    ports:
+      - "${PROXY_PORT:-8124}:8124"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:

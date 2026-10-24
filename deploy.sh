@@ -33,6 +33,7 @@ case "${1:-up}" in
         echo "==> 服务已启动："
         echo "   前端:  http://localhost:${FRONTEND_PORT:-8080}"
         echo "   后端:  http://localhost:${BACKEND_PORT:-8123}/api"
+        echo "   代理:  http://localhost:${PROXY_PORT:-8124}/__health（预览/部署域名入口）"
         ;;
     down)
         echo "==> 停止并移除服务"

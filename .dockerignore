@@ -16,6 +16,8 @@ target/
 tmp/
 **/node_modules/
 **/dist/
+# proxy 的独立 Maven 本地仓库（65MB，且与镜像内依赖无关）
+.m2repo/
 
 # 版本控制与编辑器
 .git
