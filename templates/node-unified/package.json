@@ -1,0 +1,28 @@
+{
+  "name": "unified-app",
+  "version": "1.0.0",
+  "private": true,
+  "description": "平台固定的一体化应用运行时（Node + Express + React + MySQL）",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "vite",
+    "build": "vite build"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "bcryptjs": "2.4.3",
+    "express": "4.19.2",
+    "jsonwebtoken": "9.0.2",
+    "mysql2": "3.11.3"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "4.3.4",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "react-router-dom": "6.28.0",
+    "vite": "5.4.11"
+  }
+}

@@ -14,6 +14,26 @@ declare namespace API {
     appId?: number
   }
 
+  type AppRollbackRequest = {
+    version?: number
+  }
+
+  type DeployVersionInfo = {
+    version?: number
+    status?: string
+    image?: string
+    containerName?: string
+    createTime?: string
+  }
+
+  type DeployInfo = {
+    appId?: number
+    deployKey?: string
+    currentVersion?: number
+    deployUrl?: string
+    versions?: DeployVersionInfo[]
+  }
+
   type AppQueryRequest = {
     pageNum?: number
     pageSize?: number
@@ -47,6 +67,12 @@ declare namespace API {
     createTime?: string
     updateTime?: string
     user?: UserVO
+  }
+
+  type BaseResponseDeployInfo = {
+    code?: number
+    data?: DeployInfo
+    message?: string
   }
 
   type BaseResponseAppVO = {
@@ -91,6 +117,16 @@ declare namespace API {
     message?: string
   }
 
+  type BaseResponsePreviewState = {
+    code?: number;
+    data?: {
+      state?: string;
+      heartbeatSeconds?: number;
+      leaveTimeoutSeconds?: number;
+      idleTimeoutSeconds?: number;
+    };
+    message?: string;
+  };
   type BaseResponseString = {
     code?: number
     data?: string

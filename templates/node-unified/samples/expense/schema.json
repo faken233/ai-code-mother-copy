@@ -1,0 +1,54 @@
+{
+  "version": 1,
+  "app": {
+    "name": "记账本",
+    "description": "记录支出，按分类查看，只有本人能改自己的数据"
+  },
+  "auth": {
+    "enabled": true,
+    "identifier": "email"
+  },
+  "tables": {
+    "expenses": {
+      "label": "支出",
+      "owner": true,
+      "sortDefault": "-spent_at",
+      "columns": {
+        "title": {
+          "type": "string",
+          "max": 100,
+          "required": true
+        },
+        "amount": {
+          "type": "decimal",
+          "precision": [12, 2],
+          "min": 0,
+          "required": true
+        },
+        "category": {
+          "type": "enum",
+          "values": ["餐饮", "交通", "购物", "其他"],
+          "required": true
+        },
+        "spent_at": {
+          "type": "datetime",
+          "required": true
+        },
+        "note": {
+          "type": "text",
+          "max": 1000
+        }
+      },
+      "indexes": [["user_id", "spent_at"]],
+      "list": {
+        "maxPageSize": 50
+      },
+      "access": {
+        "read": "owner",
+        "create": "owner",
+        "update": "owner",
+        "delete": "owner"
+      }
+    }
+  }
+}

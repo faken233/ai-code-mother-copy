@@ -1,10 +1,10 @@
 <template>
-  <a-modal v-model:open="visible" title="部署成功" :footer="null" width="600px">
+  <a-modal v-model:open="visible" :title="title" :footer="null" width="600px">
     <div class="deploy-success">
       <div class="success-icon">
         <CheckCircleOutlined style="color: #52c41a; font-size: 48px" />
       </div>
-      <h3>网站部署成功！</h3>
+      <h3>{{ successText }}</h3>
       <p>你的网站已经成功部署，可以通过以下链接访问：</p>
       <div class="deploy-url">
         <a-input :value="deployUrl" readonly>
@@ -31,6 +31,8 @@ import { CheckCircleOutlined, CopyOutlined } from '@ant-design/icons-vue'
 interface Props {
   open: boolean
   deployUrl: string
+  title?: string
+  successText?: string
 }
 
 interface Emits {
@@ -38,7 +40,10 @@ interface Emits {
   (e: 'open-site'): void
 }
 
-const props = defineProps<Props>()
+const props = withDefaults(defineProps<Props>(), {
+  title: '部署成功',
+  successText: '网站部署成功！',
+})
 const emit = defineEmits<Emits>()
 
 const visible = computed({

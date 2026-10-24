@@ -36,11 +36,23 @@
           </template>
           下载代码
         </a-button>
-        <a-button type="primary" @click="deployApp" :loading="deploying">
+        <a-button
+            v-if="appInfo?.deployKey && isOwner"
+            type="default"
+            :disabled="deploying || rollingBack || !canRollback"
+            :loading="rollingBack"
+            @click="rollbackDeploy"
+        >
+          <template #icon>
+            <RollbackOutlined />
+          </template>
+          回滚
+        </a-button>
+        <a-button type="primary" @click="deployApp" :loading="deploying" :disabled="!isOwner">
           <template #icon>
             <CloudUploadOutlined />
           </template>
-          部署
+          {{ deployInfo?.currentVersion ? '重新部署' : '部署' }}
         </a-button>
       </div>
     </div>
@@ -193,7 +205,19 @@
           <h3>生成后的网页展示</h3>
           <div class="preview-actions">
             <a-button
-                v-if="isOwner && previewUrl"
+                v-if="isOwner && isSandboxType(appInfo?.codeGenType)"
+                type="link"
+                :loading="previewLoading"
+                style="padding: 0; height: auto; margin-right: 12px"
+                @click="updatePreview"
+            >
+              <template #icon>
+                <PlayCircleOutlined />
+              </template>
+              预览
+            </a-button>
+            <a-button
+                v-if="isOwner && previewUrl && !previewCrossOrigin"
                 type="link"
                 :danger="isEditMode"
                 @click="toggleEditMode"
@@ -224,6 +248,7 @@
           </div>
           <iframe
               v-else
+              :key="previewKey"
               :src="previewUrl"
               class="preview-iframe"
               frameborder="0"
@@ -232,6 +257,24 @@
         </div>
       </div>
     </div>
+
+    <!-- 预览休眠提示 -->
+    <a-modal
+        v-model:open="previewAsleep"
+        title="预览已休眠"
+        :footer="null"
+        :mask-closable="false"
+    >
+      <p class="sleep-tip">
+        为节省资源，预览容器会在「离开页面」或「在页面上长时间没有改动」后自动关闭。
+      </p>
+      <p class="sleep-tip">
+        代码和数据都还在，点下方按钮重新启动即可（约 3–10 秒），访问链接不会变。
+      </p>
+      <div class="sleep-actions">
+        <a-button type="primary" :loading="previewLoading" @click="wakePreview">恢复预览</a-button>
+      </div>
+    </a-modal>
 
     <!-- 应用详情弹窗 -->
     <AppDetailModal
@@ -245,7 +288,9 @@
     <!-- 部署成功弹窗 -->
     <DeploySuccessModal
         v-model:open="deployModalVisible"
-        :deploy-url="deployUrl"
+        :deploy-url="currentDeployUrl"
+        :title="deployModalTitle"
+        :success-text="deployModalTitle === '回滚成功' ? '网站已回滚到上一版本！' : '网站部署成功！'"
         @open-site="openDeployedSite"
     />
   </div>
@@ -254,16 +299,19 @@
 <script setup lang="ts">
 import { ref, onMounted, nextTick, onUnmounted, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { message } from 'ant-design-vue'
+import { message, Modal } from 'ant-design-vue'
 import { useLoginUserStore } from '@/stores/loginUser'
 import {
   getAppVoById,
   deployApp as deployAppApi,
+  rollbackDeploy as rollbackDeployApi,
+  getDeployInfo,
   deleteApp as deleteAppApi,
   previewApp as previewAppApi,
+  heartbeatPreview as heartbeatPreviewApi,
 } from '@/api/appController'
 import { listAppChatHistory } from '@/api/chatHistoryController'
-import { CodeGenTypeEnum, formatCodeGenType } from '@/utils/codeGenTypes'
+import { CodeGenTypeEnum, formatCodeGenType, isSandboxType } from '@/utils/codeGenTypes'
 import request from '@/request'
 import {
   createGenTask,
@@ -279,17 +327,19 @@ import MarkdownRenderer from '@/components/MarkdownRenderer.vue'
 import AppDetailModal from '@/components/AppDetailModal.vue'
 import DeploySuccessModal from '@/components/DeploySuccessModal.vue'
 import aiAvatar from '@/assets/aiAvatar.png'
-import { API_BASE_URL, getStaticPreviewUrl } from '@/config/env'
+import { API_BASE_URL, getStaticPreviewUrl, getDeployUrl } from '@/config/env'
 import { VisualEditor, type ElementInfo } from '@/utils/visualEditor'
 
 import {
   CloudUploadOutlined,
+  RollbackOutlined,
   SendOutlined,
   ExportOutlined,
   InfoCircleOutlined,
   DownloadOutlined,
   EditOutlined,
   CheckCircleOutlined,
+  PlayCircleOutlined,
 } from '@ant-design/icons-vue'
 
 const route = useRoute()
@@ -304,8 +354,8 @@ const appId = ref<any>()
 const selectedMode = ref<string>('')
 const modeOptions = [
   { label: '自动识别', value: '' },
-  { label: '前端项目', value: CodeGenTypeEnum.VUE_PROJECT },
-  { label: '全栈项目', value: CodeGenTypeEnum.FULLSTACK },
+  { label: '纯前端（无存储）', value: CodeGenTypeEnum.STATIC },
+  { label: '带存储（数据库）', value: CodeGenTypeEnum.FULLSTACK },
 ]
 const onModeChange = (val: string) => {
   console.log('[GenTask] 手动选择生成模式:', val)
@@ -352,11 +402,69 @@ const historyLoaded = ref(false)
 // 预览相关
 const previewUrl = ref('')
 const previewReady = ref(false)
+const previewLoading = ref(false)
+// 预览容器被回收后置 true，弹窗说明并提供"恢复预览"
+const previewAsleep = ref(false)
+// 强制重载 iframe（休眠恢复时 URL 不变，只能靠 key 变化重新挂载）
+const previewKey = ref(0)
+// 本轮生成是否已收到 preview_reload（收到就不再靠 done 兜底重挂载，避免重复加载）
+const previewReloadedForTask = ref(false)
+let previewHeartbeatTimer: number | undefined
+
+/**
+ * 预览是否跨域：P2 起应用跑在 {code}.pv.localhost:8124，与平台不同源。
+ * 视觉编辑需要读写 iframe 的 contentDocument，跨域下浏览器直接拒绝，
+ * 所以按钮要隐藏，而不是留一个点了必然失败的功能。
+ */
+const previewCrossOrigin = computed(() => {
+  if (!previewUrl.value) return false
+  try {
+    return new URL(previewUrl.value, window.location.href).origin !== window.location.origin
+  } catch {
+    return false
+  }
+})
 
 // 部署相关
 const deploying = ref(false)
+const rollingBack = ref(false)
 const deployModalVisible = ref(false)
 const deployUrl = ref('')
+const deployModalTitle = ref('部署成功')
+const deployInfo = ref<API.DeployInfo>()
+
+// 当前部署地址：优先用本次操作返回的地址，其次由 deployKey 推导（刷新页面后仍可打开）
+const currentDeployUrl = computed(() => {
+  if (deployUrl.value) return deployUrl.value
+  return appInfo.value?.deployKey ? getDeployUrl(appInfo.value.deployKey) : ''
+})
+
+// 是否存在更早的、未清理的版本可回滚
+const canRollback = computed(() => {
+  const current = deployInfo.value?.currentVersion || 0
+  return (deployInfo.value?.versions || []).some(
+    (v) => (v.version || 0) < current && v.status !== 'PRUNED' && v.status !== 'FAILED'
+  )
+})
+
+const loadDeployInfo = async () => {
+  if (!appId.value || appId.value === 'new') return
+  try {
+    const res = await getDeployInfo({ appId: Number(appId.value) })
+    if (res.data.code === 0) {
+      deployInfo.value = res.data.data
+      if (res.data.data?.deployUrl) {
+        deployUrl.value = res.data.data.deployUrl
+      }
+      // 首次部署成功后 appInfo 仍是旧对象：补上 deployKey，回滚按钮才会出现
+      if (res.data.data?.deployKey && appInfo.value) {
+        appInfo.value.deployKey = res.data.data.deployKey
+      }
+    }
+  } catch (e) {
+    console.warn('获取部署信息失败:', e)
+  }
+}
 
 // 下载相关
 const downloading = ref(false)
@@ -413,7 +521,7 @@ const loadChatHistory = async (isLoadMore = false) => {
         for (const chat of chatHistories) {
           if (chat.messageType === 'tool_call') {
             // 工具调用块：附加到前一条 AI 消息的 blocks 中
-            let lastAi = historyMessages.findLast((m) => m.type === 'ai')
+            let lastAi = [...historyMessages].reverse().find((m) => m.type === 'ai')
             if (!lastAi) {
               lastAi = { type: 'ai', content: '', blocks: [] }
               historyMessages.push(lastAi)
@@ -503,6 +611,11 @@ const fetchAppInfo = async () => {
     const res = await getAppVoById({ id: id as unknown as number })
     if (res.data.code === 0 && res.data.data) {
       appInfo.value = res.data.data
+
+      // 加载部署信息（当前版本 / 可回滚版本），失败不影响页面
+      if (appInfo.value.deployKey) {
+        await loadDeployInfo()
+      }
 
       // 先加载对话历史
       await loadChatHistory()
@@ -607,6 +720,7 @@ const sendMessage = async () => {
 
 // 生成代码 - 使用新的任务队列 + 可重连 SSE 模式
 const generateCode = async (userMessage: string, aiMessageIndex: number) => {
+  previewReloadedForTask.value = false
   try {
     // 1. 创建生成任务（appId 可能为空，首次对话时系统会自动创建应用）
     // 注意：appId 使用字符串类型，避免大整数精度丢失
@@ -707,6 +821,17 @@ const generateCode = async (userMessage: string, aiMessageIndex: number) => {
         }
       },
 
+      // 预览热更新：应用进程已重启，哪怕 URL 不变也要让 iframe 重新加载
+      onPreviewReload: (event) => {
+        previewReloadedForTask.value = true
+        if (event.ok === false) {
+          message.warning('代码已生成，但预览热更新失败：' + (event.message || '未知原因'))
+        }
+        if (previewUrl.value) {
+          previewKey.value += 1
+        }
+      },
+
       // 完成回调
       onComplete: () => {
         console.log('[GenTask] 任务完成')
@@ -718,7 +843,11 @@ const generateCode = async (userMessage: string, aiMessageIndex: number) => {
         // 延迟更新预览，确保后端已完成处理
         setTimeout(async () => {
           await fetchAppInfo()
-          updatePreview()
+          await updatePreview()
+          // 兜底：SSE 断线重连时可能没收到 preview_reload，任务完成同样重挂载
+          if (!previewReloadedForTask.value) {
+            previewKey.value += 1
+          }
         }, 1000)
       },
 
@@ -799,23 +928,76 @@ const handleError = (error: unknown, aiMessageIndex: number) => {
   queuePosition.value = -1
 }
 
+// 预览心跳：页面可见时每 30 秒告诉后端"我还在"，顺带确认容器是否已被回收
+const stopPreviewHeartbeat = () => {
+  if (previewHeartbeatTimer) {
+    window.clearInterval(previewHeartbeatTimer)
+    previewHeartbeatTimer = undefined
+  }
+}
+
+const checkPreviewState = async () => {
+  if (!appId.value || appId.value === 'new' || !previewUrl.value) return
+  if (document.visibilityState !== 'visible') return
+  try {
+    const res = await heartbeatPreviewApi(appId.value)
+    const state = res?.data?.data?.state
+    if (state === 'SLEEPING') {
+      previewAsleep.value = true
+    } else if (state === 'READY') {
+      previewAsleep.value = false
+    }
+  } catch (e) {
+    // 心跳失败不打扰用户，下一轮再试
+  }
+}
+
+const startPreviewHeartbeat = () => {
+  stopPreviewHeartbeat()
+  previewHeartbeatTimer = window.setInterval(checkPreviewState, 30000)
+}
+
+const onVisibilityChange = () => {
+  if (document.visibilityState === 'visible') {
+    checkPreviewState()
+  }
+}
+
+// 从休眠中恢复：重新拉起容器，链接不变，强制 iframe 重挂载
+const wakePreview = async () => {
+  await updatePreview()
+  previewAsleep.value = false
+  previewKey.value += 1
+  startPreviewHeartbeat()
+}
+
 // 更新预览
 const updatePreview = async () => {
   if (appId.value) {
     const codeGenType = appInfo.value?.codeGenType || CodeGenTypeEnum.HTML
-    // 全栈项目：通过后端启动沙箱预览，返回带 appId 的预览 URL（隔离只存在于预览层）
-    if (codeGenType === CodeGenTypeEnum.FULLSTACK) {
+    // 沙箱项目（纯前端 / 带存储）：后端负责拉起容器与应用，并返回可直接访问的预览地址
+    // 地址由后端 AppRouteService 生成（{code}.pv.localhost:8124），前端不做任何拼接或兜底
+    if (isSandboxType(codeGenType)) {
+      previewLoading.value = true
       try {
         const res = await previewAppApi(appId.value)
-        if (res.data.code === 0 && res.data.data) {
+        if (res.data.code === 0) {
+          if (!res.data.data) {
+            message.error('后端未返回预览地址')
+            return
+          }
           previewUrl.value = res.data.data
           previewReady.value = true
+          previewAsleep.value = false
+          startPreviewHeartbeat()
         } else {
           message.error('启动预览失败：' + res.data.message)
         }
       } catch (e) {
         console.error('启动全栈预览失败:', e)
         message.error('启动预览失败，请重试')
+      } finally {
+        previewLoading.value = false
       }
       return
     }
@@ -887,14 +1069,20 @@ const deployApp = async () => {
 
   deploying.value = true
   try {
-    const res = await deployAppApi({
-      appId: appId.value as unknown as number,
-    })
+    const res = await deployAppApi(
+      {
+        appId: appId.value as unknown as number,
+      },
+      // 首次部署要构建镜像 + 等 migrate，默认 60s 不够
+      { timeout: 300000 }
+    )
 
     if (res.data.code === 0 && res.data.data) {
       deployUrl.value = res.data.data
+      deployModalTitle.value = '部署成功'
       deployModalVisible.value = true
       message.success('部署成功')
+      await loadDeployInfo()
     } else {
       message.error('部署失败：' + res.data.message)
     }
@@ -915,9 +1103,46 @@ const openInNewTab = () => {
 
 // 打开部署的网站
 const openDeployedSite = () => {
-  if (deployUrl.value) {
-    window.open(deployUrl.value, '_blank')
+  if (currentDeployUrl.value) {
+    window.open(currentDeployUrl.value, '_blank')
   }
+}
+
+// 回滚部署：只切路由，线上数据不回退
+const rollbackDeploy = () => {
+  if (!appId.value || appId.value === 'new') return
+  const current = deployInfo.value?.currentVersion || 0
+  const target = (deployInfo.value?.versions || []).find(
+    (v) => (v.version || 0) < current && v.status !== 'PRUNED' && v.status !== 'FAILED'
+  )
+  Modal.confirm({
+    title: '回滚部署',
+    content: target
+      ? `确定回滚到 v${target.version} 吗？部署地址不变，线上数据库不会回退。`
+      : '确定回滚到上一个版本吗？部署地址不变，线上数据库不会回退。',
+    okText: '回滚',
+    cancelText: '取消',
+    async onOk() {
+      rollingBack.value = true
+      try {
+        const res = await rollbackDeployApi({ appId: Number(appId.value) }, {}, { timeout: 180000 })
+        if (res.data.code === 0 && res.data.data) {
+          deployUrl.value = res.data.data
+          deployModalTitle.value = '回滚成功'
+          deployModalVisible.value = true
+          message.success('回滚成功')
+          await loadDeployInfo()
+        } else {
+          message.error('回滚失败：' + res.data.message)
+        }
+      } catch (error) {
+        console.error('回滚失败：', error)
+        message.error('回滚失败，请重试')
+      } finally {
+        rollingBack.value = false
+      }
+    },
+  })
 }
 
 // iframe加载完成
@@ -1036,6 +1261,7 @@ const resumeActiveTask = async () => {
     }
 
     isGenerating.value = true
+    previewReloadedForTask.value = false
 
     // 建立 SSE 连接（从已有内容的偏移位置继续）
     sseClient.value = new ReconnectableSseClient(task.id, {
@@ -1073,6 +1299,16 @@ const resumeActiveTask = async () => {
         }
       },
 
+      onPreviewReload: (event) => {
+        previewReloadedForTask.value = true
+        if (event.ok === false) {
+          message.warning('代码已生成，但预览热更新失败：' + (event.message || '未知原因'))
+        }
+        if (previewUrl.value) {
+          previewKey.value += 1
+        }
+      },
+
       onComplete: () => {
         console.log('[GenTask] 任务恢复完成')
         isGenerating.value = false
@@ -1081,7 +1317,10 @@ const resumeActiveTask = async () => {
         messages.value[aiMessageIndex].loading = false
 
         setTimeout(async () => {
-          updatePreview()
+          await updatePreview()
+          if (!previewReloadedForTask.value) {
+            previewKey.value += 1
+          }
         }, 1000)
       },
 
@@ -1125,10 +1364,15 @@ onMounted(async () => {
   window.addEventListener('message', (event) => {
     visualEditor.handleIframeMessage(event)
   })
+
+  // 回到标签页时立刻探一次，别等下一个 30 秒
+  document.addEventListener('visibilitychange', onVisibilityChange)
 })
 
 // 清理资源
 onUnmounted(() => {
+  stopPreviewHeartbeat()
+  document.removeEventListener('visibilitychange', onVisibilityChange)
   // 关闭 SSE 连接
   if (sseClient.value) {
     sseClient.value.close()
@@ -1138,6 +1382,17 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
+.sleep-tip {
+  margin-bottom: 8px;
+  color: #595959;
+  line-height: 1.7;
+}
+
+.sleep-actions {
+  margin-top: 16px;
+  text-align: right;
+}
+
 #appChatPage {
   height: 100vh;
   display: flex;

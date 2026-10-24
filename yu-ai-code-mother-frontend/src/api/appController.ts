@@ -110,6 +110,30 @@ export async function deployApp(body: API.AppDeployRequest, options?: { [key: st
   })
 }
 
+/** 回滚部署（P5）：不传 version 时回滚到上一版 */
+export async function rollbackDeploy(
+  params: { appId: number },
+  body?: API.AppRollbackRequest,
+  options?: { [key: string]: any }
+) {
+  return request<API.BaseResponseString>(`/app/deploy/${params.appId}/rollback`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    data: body || {},
+    ...(options || {}),
+  })
+}
+
+/** 部署信息（P5）：当前版本 / 可回滚版本 / 部署地址 */
+export async function getDeployInfo(params: { appId: number }, options?: { [key: string]: any }) {
+  return request<API.BaseResponseDeployInfo>(`/app/deploy/${params.appId}/info`, {
+    method: 'GET',
+    ...(options || {}),
+  })
+}
+
 /** 此处后端没有提供注释 GET /app/download/${param0} */
 export async function downloadAppCode(
   // 叠加生成的Param类型 (非body参数swagger默认没有生成对象)
@@ -177,6 +201,17 @@ export async function updateApp(body: API.AppUpdateRequest, options?: { [key: st
       'Content-Type': 'application/json',
     },
     data: body,
+    ...(options || {}),
+  })
+}
+
+/** POST /app/preview/{appId}/heartbeat 预览心跳（返回 READY / SLEEPING） */
+export async function heartbeatPreview(
+  appId: string | number,
+  options?: { [key: string]: any },
+) {
+  return request<API.BaseResponsePreviewState>(`/app/preview/${appId}/heartbeat`, {
+    method: 'POST',
     ...(options || {}),
   })
 }

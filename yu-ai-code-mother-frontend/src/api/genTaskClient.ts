@@ -43,6 +43,7 @@ export enum SseEventType {
   QUEUE = 'queue',     // 队列位置更新
   RECONNECT = 'reconnect', // 重连恢复数据
   TOOL_EXECUTED = 'tool_executed', // 工具执行结果（一个块展示，含完成标记）
+  PREVIEW_RELOAD = 'preview_reload', // 预览热更新完成（前端重挂载 iframe）
   DONE = 'done',       // 完成
   ERROR = 'error',     // 错误
   CANCELLED = 'cancelled', // 已取消
@@ -62,6 +63,19 @@ export interface ToolExecutedEvent {
 }
 
 /**
+ * 预览热更新事件数据（生成结束、应用进程重启完成后推送）
+ */
+export interface PreviewReloadEvent {
+  /** 应用是否已重新就绪 */
+  ok: boolean;
+  /** 沙箱未启用时置 true（本地直写模式无需重启） */
+  skipped?: boolean;
+  /** 失败原因（ok=false 时有值） */
+  message?: string;
+  appId?: string | number;
+}
+
+/**
  * SSE 连接配置
  */
 export interface SseConnectionConfig {
@@ -75,6 +89,8 @@ export interface SseConnectionConfig {
   onData?: (chunk: string) => void;
   /** 工具执行结果回调 */
   onToolExecuted?: (event: ToolExecutedEvent) => void;
+  /** 预览热更新回调（生成结束后应用已重启，可安全重挂载 iframe） */
+  onPreviewReload?: (event: PreviewReloadEvent) => void;
   /** 状态变更回调 */
   onStatusChange?: (status: string, queuePosition: number) => void;
   /** 队列位置更新回调 */
@@ -251,6 +267,16 @@ export class ReconnectableSseClient {
         this.config.onToolExecuted?.(data);
       } catch (e) {
         console.error('[SSE] 解析工具执行结果失败:', e);
+      }
+    });
+
+    // 预览热更新事件（应用已重启，iframe 需要重挂载）
+    this.eventSource.addEventListener('preview_reload', (event: MessageEvent) => {
+      try {
+        const data = JSON.parse(event.data);
+        this.config.onPreviewReload?.(data);
+      } catch (e) {
+        console.error('[SSE] 解析预览热更新事件失败:', e);
       }
     });
 
