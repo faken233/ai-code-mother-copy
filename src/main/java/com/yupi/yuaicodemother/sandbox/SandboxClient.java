@@ -46,6 +46,9 @@ public class SandboxClient {
     @Lazy
     private SandboxContainerManager sandboxContainerManager;
 
+    @Resource
+    private ToolTokenService toolTokenService;
+
     /**
      * 是否启用沙箱
      */
@@ -64,23 +67,11 @@ public class SandboxClient {
     }
 
     /**
-     * 根据 appId 计算宿主映射端口（预览使用，映射容器内 node 文件服务 8080）
+     * 工具通道的宿主端口（映射容器内 node 文件服务 8080）。
+     * 以 docker port 回读为准，不再按 appId 取模。
      */
     public int getPreviewPort(Long appId) {
-        if (appId == null) {
-            return sandboxProperties.getPreviewPortRangeStart();
-        }
-        return sandboxProperties.getPreviewPortRangeStart() + (int) (appId % sandboxProperties.getPreviewPortRangeSize());
-    }
-
-    /**
-     * 根据 appId 计算宿主映射的后端端口（映射容器内 Spring Boot 8081）
-     */
-    public int getBackendPort(Long appId) {
-        if (appId == null) {
-            return sandboxProperties.getBackendPortRangeStart();
-        }
-        return sandboxProperties.getBackendPortRangeStart() + (int) (appId % sandboxProperties.getPreviewPortRangeSize());
+        return sandboxContainerManager.toolHostPort(appId);
     }
 
     /**
@@ -95,13 +86,19 @@ public class SandboxClient {
      * 向沙箱发送 POST 请求，返回 JSON 中的 data 字段
      */
     private JSONObject post(Long appId, String path, Map<String, Object> payload) {
+        return post(appId, path, payload, 60000);
+    }
+
+    private JSONObject post(Long appId, String path, Map<String, Object> payload, int timeoutMs) {
         // 懒拉起：确保沙箱容器已就绪，避免 AI 首次调工具时容器未启动
         ensureContainer(appId);
         String url = buildBaseUrl(appId) + path;
         try {
             HttpResponse response = HttpRequest.post(url)
+                    // 工具通道鉴权：令牌由容器启动时注入，见 ToolTokenService
+                    .header("X-Tool-Token", toolTokenService.tokenOf(appId))
                     .body(JSONUtil.toJsonStr(payload))
-                    .timeout(60000)
+                    .timeout(timeoutMs)
                     .execute();
             JSONObject json = JSONUtil.parseObj(response.body());
             if (!json.getBool("ok", false)) {
@@ -115,6 +112,24 @@ public class SandboxClient {
             log.error("沙箱接口调用异常: {} -> {}", url, e.getMessage());
             throw new BusinessException(ErrorCode.SYSTEM_ERROR, "沙箱服务不可用: " + e.getMessage());
         }
+    }
+
+    /**
+     * 重启运行中的应用进程（不重新构建），等待应用健康。
+     * 生成结束后的热更新入口；schema 变更在应用启动时由 migrate 自动应用。
+     */
+    public JSONObject restartApp(Long appId) {
+        return post(appId, "/api/app/restart", Map.of(), 120_000);
+    }
+
+    /**
+     * 重建 + 重启应用。
+     *
+     * @param forceBuild true 时执行 npm run build；false 时只校验已有构建产物
+     *                   （生成流程已由平台 BuildProjectTool 构建过，避免重复构建）
+     */
+    public JSONObject rebuildApp(Long appId, boolean forceBuild) {
+        return post(appId, "/api/app/rebuild", Map.of("forceBuild", forceBuild), 240_000);
     }
 
     /**

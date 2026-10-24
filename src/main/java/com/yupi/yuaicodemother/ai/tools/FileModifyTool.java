@@ -1,6 +1,7 @@
 package com.yupi.yuaicodemother.ai.tools;
 
 import cn.hutool.json.JSONObject;
+import com.yupi.yuaicodemother.template.AppTemplateService;
 import dev.langchain4j.agent.tool.P;
 import dev.langchain4j.agent.tool.Tool;
 import dev.langchain4j.agent.tool.ToolMemoryId;
@@ -30,6 +31,10 @@ public class FileModifyTool extends BaseTool {
             String newContent,
             @ToolMemoryId Long appId
     ) {
+        if (AppTemplateService.isPlatformOwned(relativeFilePath)) {
+            return "❌ 该文件由平台维护，禁止修改：" + relativeFilePath
+                    + "。请把改动放在 schema.json 或 client/src/App.jsx 里。";
+        }
         try {
             return sandboxClient.modifyFile(relativeFilePath, oldContent, newContent, appId);
         } catch (Exception e) {

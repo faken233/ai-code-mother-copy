@@ -41,4 +41,4 @@ RUN chmod +x /app/start.sh
 WORKDIR /workspace
 EXPOSE 8080
 
-ENTRYPOINT ["node", "/app/app.js"]
+ENTRYPOINT ["/app/start.sh"]

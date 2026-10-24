@@ -1,6 +1,9 @@
 package com.yupi.yuaicodemother.ai.tools;
 
 import cn.hutool.json.JSONObject;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.yupi.yuaicodemother.model.enums.CodeGenTypeEnum;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.langchain4j.agent.tool.P;
 import dev.langchain4j.agent.tool.Tool;
 import dev.langchain4j.agent.tool.ToolMemoryId;
@@ -13,12 +16,18 @@ import java.io.BufferedReader;
 import java.io.File;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Paths;
+import java.util.Iterator;
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 /**
  * 项目构建工具
- * 支持 AI 调用来构建 Vue 前端或 Spring Boot 后端项目，如果构建失败会返回错误信息给 AI 进行修复
+ * <p>
+ * 两种项目形态：
+ * - 一体化项目（根目录有 schema.json + server.js）：校验声明 → npm run build → node --check → 检查 public/dist
+ * - 旧项目（frontend/ + backend/）：保持原有 npm / mvn 构建
  */
 @Slf4j
 @Component
@@ -46,11 +55,28 @@ public class BuildProjectTool extends BaseTool {
     private static final int MVN_BUILD_TIMEOUT = 300;
 
     /**
+     * node 语法检查超时时间（秒）
+     */
+    private static final int NODE_CHECK_TIMEOUT = 60;
+
+    /**
+     * schema.json 允许的字段类型
+     */
+    private static final java.util.Set<String> ALLOWED_TYPES = java.util.Set.of(
+            "string", "text", "int", "bigint", "decimal", "bool", "datetime", "date", "json", "enum");
+
+    /**
+     * 平台自动补的系统字段，schema 里不允许声明
+     */
+    private static final java.util.Set<String> SYSTEM_COLUMNS = java.util.Set.of(
+            "id", "user_id", "created_at", "updated_at");
+
+    /**
      * 最大错误输出长度（字符数）
      */
     private static final int MAX_ERROR_LENGTH = 4000;
 
-    @Tool("构建项目。scope 为 frontend 时构建前端（npm install + npm run build）；scope 为 backend 时构建后端（mvn compile）。不传则根据项目目录自动探测。如果构建失败，会返回详细的错误信息，你需要根据错误信息修复代码后重新调用此工具。")
+    @Tool("构建并校验项目。一体化项目会校验 schema.json、扫描违禁用法、执行 npm run build 与 node 语法检查；旧项目按 scope 走前端/后端构建。如果失败会返回详细错误，你需要据此修复后重新调用此工具。")
     public String buildProject(
             @P("构建范围：frontend（前端）/ backend（后端），可选，缺省自动探测")
             String scope,
@@ -65,6 +91,11 @@ public class BuildProjectTool extends BaseTool {
         // 检查项目目录
         if (!projectDir.exists() || !projectDir.isDirectory()) {
             return "❌ 构建失败：项目目录不存在 - " + projectPath;
+        }
+
+        // 一体化项目：根目录有 schema.json 即认为是新形态
+        if (new File(projectDir, "schema.json").exists()) {
+            return buildUnified(projectDir, skipInstall, appId);
         }
 
         // 自动探测构建范围
@@ -83,6 +114,187 @@ public class BuildProjectTool extends BaseTool {
             return buildBackend(projectDir, appId);
         } else {
             return "❌ 构建失败：未知的构建范围 - " + scope;
+        }
+    }
+
+    /**
+     * 一体化项目构建：校验声明 → 违禁扫描 → 依赖 → 前端构建 → 服务端语法检查
+     */
+    private String buildUnified(File projectDir, boolean skipInstall, Long appId) {
+        StringBuilder output = new StringBuilder();
+
+        String schemaError = validateSchema(projectDir, projectPathResolver.resolveCodeGenType(appId));
+        if (schemaError != null) {
+            return schemaError;
+        }
+        output.append("✅ schema.json 校验通过\n");
+
+        String scanError = scanForbidden(projectDir);
+        if (scanError != null) {
+            return scanError;
+        }
+        output.append("✅ 未发现违禁用法（裸 SQL / 硬编码地址）\n");
+
+        boolean hasModules = new File(projectDir, "node_modules").exists();
+        if (!skipInstall && !hasModules) {
+            CommandResult installResult = execShell(projectDir,
+                    "unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY; "
+                            + "npm install --registry=https://registry.npmmirror.com --no-audit --no-fund",
+                    NPM_INSTALL_TIMEOUT, appId);
+            if (!installResult.success) {
+                return formatBuildError("npm install", installResult);
+            }
+            output.append("✅ npm install 成功\n");
+        } else {
+            output.append(hasModules ? "⏭️ 依赖已存在，跳过安装\n" : "⏭️ 跳过依赖安装\n");
+        }
+
+        CommandResult buildResult = execShell(projectDir, "npm run build", NPM_BUILD_TIMEOUT, appId);
+        if (!buildResult.success) {
+            return formatBuildError("npm run build", buildResult);
+        }
+        output.append("✅ npm run build 成功\n");
+
+        File indexFile = new File(projectDir, "public/dist/index.html");
+        if (!indexFile.exists()) {
+            return "❌ 构建失败：public/dist/index.html 未生成。请不要修改 vite.config.js（平台文件），检查 client/src/App.jsx 是否可编译。";
+        }
+        output.append("✅ public/dist/index.html 已生成\n");
+
+        CommandResult checkResult = execShell(projectDir, "node --check server.js", NODE_CHECK_TIMEOUT, appId);
+        if (!checkResult.success) {
+            return formatBuildError("node --check server.js", checkResult);
+        }
+        output.append("✅ server.js 语法检查通过");
+        return output.toString();
+    }
+
+    /**
+     * 校验 schema.json：结构、表名、字段类型、系统字段。
+     * <p>
+     * 纯前端（STATIC）与带存储（FULLSTACK）的契约相反：
+     * - STATIC：tables 必须为空、auth 必须关闭（数据只能放内存/localStorage）
+     * - FULLSTACK：至少声明一张表
+     */
+    private String validateSchema(File projectDir, CodeGenTypeEnum codeGenType) {
+        File schemaFile = new File(projectDir, "schema.json");
+        if (!schemaFile.exists()) {
+            return "❌ 缺少 schema.json：你必须先声明应用信息";
+        }
+        JsonNode root;
+        try {
+            root = new ObjectMapper().readTree(schemaFile);
+        } catch (Exception e) {
+            return "❌ schema.json 不是合法 JSON: " + e.getMessage();
+        }
+        JsonNode tables = root.get("tables");
+        boolean emptyTables = tables == null || !tables.isObject() || tables.isEmpty();
+        if (codeGenType == CodeGenTypeEnum.STATIC) {
+            if (root.path("auth").path("enabled").asBoolean(false)) {
+                return "❌ 纯前端项目不能开启登录（schema.auth.enabled 必须为 false）";
+            }
+            if (!emptyTables) {
+                return "❌ 纯前端项目不能声明数据表（schema.tables 必须为空对象）";
+            }
+            return null;
+        }
+        if (emptyTables) {
+            return "❌ schema.json 缺少 tables，至少要声明一张表";
+        }
+        Iterator<String> tableNames = tables.fieldNames();
+        while (tableNames.hasNext()) {
+            String table = tableNames.next();
+            if (!table.matches("[a-z][a-z0-9_]{1,40}")) {
+                return "❌ 表名不合法：" + table + "（小写字母开头，只含小写字母、数字、下划线）";
+            }
+            JsonNode meta = tables.get(table);
+            JsonNode columns = meta.get("columns");
+            if (columns == null || !columns.isObject() || columns.isEmpty()) {
+                return "❌ 表 " + table + " 缺少 columns";
+            }
+            Iterator<String> columnNames = columns.fieldNames();
+            while (columnNames.hasNext()) {
+                String column = columnNames.next();
+                if (SYSTEM_COLUMNS.contains(column)) {
+                    return "❌ 表 " + table + " 声明了系统字段 " + column + "：id/user_id/created_at/updated_at 由平台自动生成，请删除";
+                }
+                if (!column.matches("[a-z][a-z0-9_]{0,40}")) {
+                    return "❌ 字段名不合法：" + table + "." + column + "（小写字母开头，只含小写字母、数字、下划线）";
+                }
+                JsonNode def = columns.get(column);
+                String type = def.path("type").asText("");
+                if (!ALLOWED_TYPES.contains(type)) {
+                    return "❌ 字段 " + table + "." + column + " 的类型不受支持：" + type
+                            + "，可选 " + ALLOWED_TYPES;
+                }
+                if ("enum".equals(type)) {
+                    JsonNode values = def.get("values");
+                    if (values == null || !values.isArray() || values.isEmpty()) {
+                        return "❌ 枚举字段 " + table + "." + column + " 必须提供非空 values 数组";
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 违禁用法扫描：自定义路由里出现裸 SQL、页面里出现硬编码地址，都会让应用在预览/短链下失效
+     */
+    private String scanForbidden(File projectDir) {
+        File customRoute = new File(projectDir, "routes/custom.js");
+        if (customRoute.exists()) {
+            try {
+                String content = Files.readString(customRoute.toPath(), StandardCharsets.UTF_8);
+                for (String pattern : List.of("pool.", "execute(", "SELECT ", "INSERT ", "UPDATE ", "DELETE ", "process.env.DB")) {
+                    if (content.contains(pattern)) {
+                        return "❌ routes/custom.js 出现禁用写法：" + pattern
+                                + "。自定义接口只能用 ctx.db 的 list/get/insert/update/remove/count，禁止裸 SQL";
+                    }
+                }
+            } catch (Exception e) {
+                return "❌ 读取 routes/custom.js 失败：" + e.getMessage();
+            }
+        }
+
+        File clientSrc = new File(projectDir, "client/src");
+        if (clientSrc.isDirectory()) {
+            java.util.List<File> sources = new java.util.ArrayList<>();
+            collectFiles(clientSrc, sources);
+            for (File file : sources) {
+                // 平台文件本身不参与扫描（例如 api.js 注释里就提到 /api/preview/）
+                String relative = projectDir.toPath().relativize(file.toPath()).toString().replace('\\', '/');
+                if (com.yupi.yuaicodemother.template.AppTemplateService.isPlatformOwned(relative)) {
+                    continue;
+                }
+                try {
+                    String content = Files.readString(file.toPath(), StandardCharsets.UTF_8);
+                    for (String pattern : List.of("localhost:", "127.0.0.1", "/api/preview/")) {
+                        if (content.contains(pattern)) {
+                            return "❌ 前端出现硬编码地址：" + pattern + "（" + file.getName()
+                                    + "）。接口必须用 ./api 相对路径，禁止写死主机/端口/appId";
+                        }
+                    }
+                } catch (Exception e) {
+                    return "❌ 读取前端文件失败：" + e.getMessage();
+                }
+            }
+        }
+        return null;
+    }
+
+    private void collectFiles(File dir, java.util.List<File> result) {
+        File[] files = dir.listFiles();
+        if (files == null) {
+            return;
+        }
+        for (File file : files) {
+            if (file.isDirectory()) {
+                collectFiles(file, result);
+            } else if (file.getName().endsWith(".js") || file.getName().endsWith(".jsx")
+                    || file.getName().endsWith(".ts") || file.getName().endsWith(".tsx")) {
+                result.add(file);
+            }
         }
     }
 
@@ -216,6 +428,64 @@ public class BuildProjectTool extends BaseTool {
      */
     private boolean isWindows() {
         return System.getProperty("os.name").toLowerCase().contains("windows");
+    }
+
+    /**
+     * 用 sh -c 执行脚本。
+     * <p>
+     * 沙箱的命令白名单只有 npm/mvn/java/node/javac/sh/bash，没有 env，
+     * 所以"临时去掉 http_proxy"这类操作要交给 sh 自己 unset。
+     */
+    private CommandResult execShell(File workingDir, String script, int timeoutSeconds, Long appId) {
+        CommandResult result = new CommandResult();
+        try {
+            if (sandboxClient.isEnabled()) {
+                String name = workingDir.getName();
+                String cwd = ("frontend".equals(name) || "backend".equals(name)) ? name : "";
+                com.yupi.yuaicodemother.sandbox.SandboxClient.CommandResult sandboxResult =
+                        sandboxClient.exec("sh", List.of("-c", script), cwd, timeoutSeconds * 1000, appId);
+                result.success = sandboxResult.success;
+                result.timeout = sandboxResult.timedOut;
+                result.exitCode = sandboxResult.exitCode;
+                result.stdout = sandboxResult.stdout;
+                result.stderr = sandboxResult.stderr;
+                return result;
+            }
+
+            ProcessBuilder pb = new ProcessBuilder("sh", "-c", script);
+            pb.directory(workingDir);
+            pb.redirectErrorStream(false);
+            Process process = pb.start();
+            StringBuilder out = new StringBuilder();
+            StringBuilder err = new StringBuilder();
+            Thread t1 = Thread.ofVirtual().start(() -> out.append(new String(readAll(process.getInputStream()), StandardCharsets.UTF_8)));
+            Thread t2 = Thread.ofVirtual().start(() -> err.append(new String(readAll(process.getErrorStream()), StandardCharsets.UTF_8)));
+            boolean finished = process.waitFor(timeoutSeconds, TimeUnit.SECONDS);
+            if (!finished) {
+                process.destroyForcibly();
+                result.timeout = true;
+                return result;
+            }
+            t1.join(3000);
+            t2.join(3000);
+            result.exitCode = process.exitValue();
+            result.stdout = out.toString();
+            result.stderr = err.toString();
+            result.success = result.exitCode == 0;
+            return result;
+        } catch (Exception e) {
+            result.success = false;
+            result.stderr = "命令执行异常: " + e.getMessage();
+            return result;
+        }
+    }
+
+    private byte[] readAll(java.io.InputStream in) {
+        try {
+            return in.readAllBytes();
+        } catch (Exception e) {
+            return new byte[0];
+        }
     }
 
     /**

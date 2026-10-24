@@ -44,6 +44,12 @@ public class RoutingAiModelConfig {
     private Boolean logResponses = false;
 
     /**
+     * 思考强度（low/medium/high，DeepSeek 兼容 OpenAI 风格参数）
+     * 默认 low：防止路由判断时推理模型过度思考（路由 max-tokens 较小，思考过久会截断）
+     */
+    private String reasoningEffort = "low";
+
+    /**
      * 创建用于路由判断的ChatModel
      */
     @Bean
@@ -62,6 +68,7 @@ public class RoutingAiModelConfig {
                 .timeout(timeout)
                 .logRequests(logRequests)
                 .logResponses(logResponses)
+                .reasoningEffort(reasoningEffort)
                 .build();
     }
 }

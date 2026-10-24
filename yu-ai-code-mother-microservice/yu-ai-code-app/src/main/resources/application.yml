@@ -36,14 +36,14 @@ langchain4j:
     chat-model:
       base-url: https://api.deepseek.com
       api-key: <Your API Key>
-      model-name: deepseek-chat
+      model-name: deepseek-flash
       max-tokens: 8192
       log-requests: true
       log-responses: true
     streaming-chat-model:
       base-url: https://api.deepseek.com
       api-key: <Your API Key>
-      model-name: deepseek-chat
+      model-name: deepseek-flash
       max-tokens: 8192
       log-requests: true
       log-responses: true
@@ -51,16 +51,16 @@ langchain4j:
     reasoning-streaming-chat-model:
       base-url: https://api.deepseek.com
       api-key: <Your API Key>
-      model-name: deepseek-reasoner
+      model-name: deepseek-flash
       max-tokens: 32768
       temperature: 0.1
       log-requests: true
       log-responses: true
     # 智能路由 AI 模型配置
     routing-chat-model:
-      base-url: https://dashscope.aliyuncs.com/compatible-mode/v1
+      base-url: https://api.deepseek.com
       api-key: <Your API Key>
-      model-name: qwen-turbo
+      model-name: deepseek-flash
       max-tokens: 100
       log-requests: true
       log-responses: true

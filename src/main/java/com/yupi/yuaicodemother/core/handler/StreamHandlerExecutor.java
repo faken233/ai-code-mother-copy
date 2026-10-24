@@ -35,9 +35,11 @@ public class StreamHandlerExecutor {
                                   ChatHistoryService chatHistoryService,
                                   long appId, User loginUser, CodeGenTypeEnum codeGenType) {
         return switch (codeGenType) {
-            case VUE_PROJECT, FULLSTACK -> // 使用注入的组件实例
+            // 沙箱项目（纯前端 / 带存储）都用工具调用，事件是 JSON 结构化消息
+            case VUE_PROJECT, FULLSTACK, STATIC ->
                     jsonMessageStreamHandler.handle(originFlux, chatHistoryService, appId, loginUser);
-            case HTML, MULTI_FILE -> // 简单文本处理器不需要依赖注入
+            // 历史类型：纯文本流
+            case HTML, MULTI_FILE ->
                     new SimpleTextStreamHandler().handle(originFlux, chatHistoryService, appId, loginUser);
         };
     }

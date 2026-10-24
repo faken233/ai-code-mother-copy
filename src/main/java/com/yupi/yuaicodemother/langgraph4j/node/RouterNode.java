@@ -1,6 +1,6 @@
 package com.yupi.yuaicodemother.langgraph4j.node;
 
-import com.yupi.yuaicodemother.ai.AiCodeGenTypeRoutingService;
+import com.yupi.yuaicodemother.ai.AppModeRouter;
 import com.yupi.yuaicodemother.langgraph4j.state.WorkflowContext;
 import com.yupi.yuaicodemother.model.enums.CodeGenTypeEnum;
 import com.yupi.yuaicodemother.utils.SpringContextUtil;
@@ -21,17 +21,10 @@ public class RouterNode {
             WorkflowContext context = WorkflowContext.getContext(state);
             log.info("执行节点: 智能路由");
 
-            CodeGenTypeEnum generationType;
-            try {
-                // 获取AI路由服务
-                AiCodeGenTypeRoutingService routingService = SpringContextUtil.getBean(AiCodeGenTypeRoutingService.class);
-                // 根据原始提示词进行智能路由
-                generationType = routingService.routeCodeGenType(context.getOriginalPrompt());
-                log.info("AI智能路由完成，选择类型: {} ({})", generationType.getValue(), generationType.getText());
-            } catch (Exception e) {
-                log.error("AI智能路由失败，使用默认HTML类型: {}", e.getMessage());
-                generationType = CodeGenTypeEnum.HTML;
-            }
+            // 与创建应用时同一套规则路由（关键词），保证两处判定一致
+            AppModeRouter router = SpringContextUtil.getBean(AppModeRouter.class);
+            CodeGenTypeEnum generationType = router.route(context.getOriginalPrompt());
+            log.info("规则路由完成，选择类型: {} ({})", generationType.getValue(), generationType.getText());
 
             // 更新状态
             context.setCurrentStep("智能路由");

@@ -60,11 +60,11 @@ public class GenTaskServiceImpl extends ServiceImpl<GenTaskMapper, GenTask> impl
             app = appService.getById(appId);
 
             // 用户手动选择了代码生成类型，则覆盖 AI 路由结果
-            if (StrUtil.isNotBlank(codeGenType)
-                    && CodeGenTypeEnum.getEnumByValue(codeGenType) != null) {
+            CodeGenTypeEnum requestedType = CodeGenTypeEnum.getSelectableEnumByValue(codeGenType);
+            if (StrUtil.isNotBlank(codeGenType) && requestedType != null) {
                 App updateApp = new App();
                 updateApp.setId(appId);
-                updateApp.setCodeGenType(codeGenType);
+                updateApp.setCodeGenType(requestedType.getValue());
                 appService.updateById(updateApp);
                 app = appService.getById(appId);
             }
@@ -145,23 +145,16 @@ public class GenTaskServiceImpl extends ServiceImpl<GenTaskMapper, GenTask> impl
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void markTaskRunning(Long taskId) {
-        GenTask updateTask = new GenTask();
-        updateTask.setId(taskId);
-        updateTask.setStatus(GenTaskStatusEnum.RUNNING.getValue());
-        updateTask.setStartTime(LocalDateTime.now());
-        updateTask.setUpdateTime(LocalDateTime.now());
-        this.updateById(updateTask);
+        // startTime 用 IFNULL：沙箱搭建阶段已经写入起点，这里不能把超时计时重置
+        this.mapper.markRunning(taskId);
         log.info("任务 {} 开始执行", taskId);
     }
 
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void markTaskSandboxBuilding(Long taskId) {
-        GenTask updateTask = new GenTask();
-        updateTask.setId(taskId);
-        updateTask.setStatus(GenTaskStatusEnum.SANDBOX_BUILDING.getValue());
-        updateTask.setUpdateTime(LocalDateTime.now());
-        this.updateById(updateTask);
+        // 同时写 startTime（为空时），否则 sandbox_building 永远不会被超时扫描覆盖
+        this.mapper.markSandboxBuilding(taskId);
         log.info("任务 {} 沙箱搭建中", taskId);
     }
 

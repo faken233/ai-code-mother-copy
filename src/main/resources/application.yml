@@ -9,21 +9,19 @@ spring:
   # mysql
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
-    url: jdbc:mysql://localhost:3306/yu_ai_code_mother
-    username: root
-    password: 123456
+    url: ${MYSQL_URL:jdbc:mysql://localhost:3306/yu_ai_code_mother}
+    username: ${MYSQL_USERNAME:root}
+    password: ${MYSQL_PASSWORD:123456}
   # redis
   data:
     redis:
-      host: localhost
-      port: 6379
-      database: 0
-      password:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      database: ${REDIS_DATABASE:0}
+      password: ${REDIS_PASSWORD:}
       ttl: 3600 # 缓存过期时间（秒）
-  profiles:
-    active: local
 server:
-  port: 8123
+  port: ${SERVER_PORT:8123}
   servlet:
     context-path: /api
     # cookie 30 天过期
@@ -41,13 +39,15 @@ knife4j:
   enable: true
   setting:
     language: zh_cn
-# AI
+# AI（敏感配置统一从 .env 读取，默认值仅占位）
 langchain4j:
   open-ai:
     chat-model:
-      base-url: https://api.deepseek.com
-      api-key: <Your API Key>
-      model-name: deepseek-chat
+      base-url: ${LLM_BASE_URL:https://api.deepseek.com}
+      api-key: ${LLM_API_KEY:<Your API Key>}
+      model-name: ${LLM_CHAT_MODEL:deepseek-flash}
+      # 思考强度（none/low/high/max）：none 关闭思考；low 限制推理模型过度思考导致 token 耗尽、正文为空
+      reasoning-effort: ${LLM_REASONING_EFFORT:low}
 #      strict-json-schema: true
 #      response-format: json_object
       max-tokens: 8192
@@ -58,20 +58,13 @@ langchain4j:
       log-responses: false
       max-retries: 3
     streaming-chat-model:
-      base-url: https://api.deepseek.com
-      api-key: <Your API Key>
-      model-name: deepseek-chat
-      max-tokens: 8192
-      temperature: 0.7
-      top-p: 1.0
-      timeout: 60s
-      log-requests: false
-      log-responses: false
-    # 推理 AI 模型配置（用于复杂的推理任务）
-    reasoning-streaming-chat-model:
-      base-url: https://api.deepseek.com
-      api-key: <Your API Key>
-      model-name: deepseek-reasoner
+      base-url: ${LLM_BASE_URL:https://api.deepseek.com}
+      api-key: ${LLM_API_KEY:<Your API Key>}
+      model-name: ${LLM_STREAMING_MODEL:deepseek-flash}
+      # 统一的流式模型：HTML/MULTI_FILE/VUE/FULLSTACK 全部共用（langchain4j starter 自动装配）
+      # 模型名配推理模型 + reasoning-effort 限制思考强度 + return-thinking 返回思考内容
+      reasoning-effort: ${LLM_REASONING_EFFORT:low}
+      return-thinking: true
       max-tokens: 32768
       temperature: 0.1
       top-p: 1.0
@@ -80,10 +73,12 @@ langchain4j:
       log-responses: false
     # 智能路由 AI 模型配置（用于简单的分类任务）
     routing-chat-model:
-      base-url: https://dashscope.aliyuncs.com/compatible-mode/v1
-      api-key: <Your API Key>
-      model-name: qwen-turbo
-      max-tokens: 1000
+      base-url: ${LLM_ROUTING_BASE_URL:https://api.deepseek.com}
+      api-key: ${LLM_API_KEY:<Your API Key>}
+      model-name: ${LLM_ROUTING_MODEL:deepseek-flash}
+      reasoning-effort: ${LLM_REASONING_EFFORT:low}
+      # 该模型是推理模型：thinking 会消耗 completion token，1000 时常把 JSON 挤掉导致空响应
+      max-tokens: 4000
       temperature: 0.1
       top-p: 1.0
       timeout: 30s
@@ -92,18 +87,18 @@ langchain4j:
 # 添加 COS 对象存储配置（需要从腾讯云获取）
 cos:
   client:
-    host: your-custom-domain.com
-    secretId: your-secret-id
-    secretKey: your-secret-key
-    region: ap-shanghai
-    bucket: your-bucket-name
+    host: ${COS_HOST:your-custom-domain.com}
+    secretId: ${COS_SECRET_ID:your-secret-id}
+    secretKey: ${COS_SECRET_KEY:your-secret-key}
+    region: ${COS_REGION:ap-shanghai}
+    bucket: ${COS_BUCKET:your-bucket-name}
 # Pexels 图片搜索配置
 pexels:
-  api-key: <Your API Key>
+  api-key: ${PEXELS_API_KEY:<Your API Key>}
 # 阿里云 DashScope 配置
 dashscope:
-  api-key: <Your API Key>
-  image-model: wan2.2-t2i-flash
+  api-key: ${DASHSCOPE_API_KEY:<Your API Key>}
+  image-model: ${DASHSCOPE_IMAGE_MODEL:wan2.2-t2i-flash}
 # 日志配置
 logging:
   level:
@@ -135,30 +130,88 @@ gen-task:
 # Docker 代码沙箱配置
 sandbox:
   # 是否启用沙箱（默认开启 docker 模式，无 docker 环境时可改为 false 降级本地直写）
-  enabled: true
+  enabled: ${SANDBOX_ENABLED:true}
   # 沙箱镜像名
-  image: code-sandbox:latest
+  image: ${SANDBOX_IMAGE:code-sandbox:latest}
   # 工作区根目录（宿主机）
   workspace-root: ${user.dir}/tmp/code_output
-  # 预览端口范围起（映射容器内 node 文件服务 8080）
-  preview-port-range-start: 18080
-  # 预览端口范围内偏移上限
-  preview-port-range-size: 1000
+  # 宿主机侧工作区根目录（docker run -v 挂载源；compose 容器内用宿主路径经 SANDBOX_WORKSPACE_HOST_DIR 注入）
+  workspace-host-dir: ${SANDBOX_WORKSPACE_HOST_DIR:${user.dir}/tmp/code_output}
   # 沙箱容器内 HTTP 服务（node 文件服务）端口
   container-port: 8080
-  # 沙箱容器内 Spring Boot 后端端口
-  container-backend-port: 8081
-  # 映射到宿主机的后端端口范围起（反代到容器内后端）
-  backend-port-range-start: 19080
+  # 沙箱容器内一体化应用端口（node server.js）
+  app-container-port: 3000
+  # 宿主端口不再按 appId 计算：docker run 用 -p 127.0.0.1::<容器端口> 交给内核随机分配，
+  # 启动后由 docker port 回读（见 SandboxContainerManager#hostPortOf）
+  # 宿主机端口绑定地址：默认仅本机（工具通道含 /api/exec，不能暴露到局域网）
+  bind-address: ${SANDBOX_BIND_ADDRESS:127.0.0.1}
   # 主服务访问沙箱容器的地址（本地直跑=localhost，compose 内=host.docker.internal）
-  host: localhost
+  host: ${SANDBOX_HOST:localhost}
   # 沙箱专用 MySQL 主机（供沙箱内后端连接，与平台物理隔离）
-  mysql-host: host.docker.internal
-  mysql-port: 3307
+  mysql-host: ${SANDBOX_MYSQL_HOST:host.docker.internal}
+  mysql-port: ${SANDBOX_MYSQL_PORT:3307}
   # 沙箱专用 Redis 主机（供沙箱内后端连接，与平台物理隔离）
-  redis-host: host.docker.internal
-  redis-port: 6380
+  redis-host: ${SANDBOX_REDIS_HOST:host.docker.internal}
+  redis-port: ${SANDBOX_REDIS_PORT:6380}
   # MySQL root 用户
-  mysql-user: root
+  mysql-user: ${SANDBOX_MYSQL_USER:root}
   # MySQL root 密码（仅用于沙箱内建库）
-  mysql-password: 123456
+  mysql-password: ${SANDBOX_MYSQL_PASSWORD:123456}
+  # 工具通道令牌密钥（HMAC-SHA256(secret, appId) → 容器内 TOOL_TOKEN）
+  # 必须跨主服务重启保持稳定；共享/生产环境请务必覆盖默认值
+  tool-token-secret: ${SANDBOX_TOOL_TOKEN_SECRET:local-dev-tool-token-secret}
+
+# 生成应用的访问入口
+code:
+  # 预览地址形态：{scheme}://{previewCode}.{suffix}:{port}/
+  # previewCode 由 AppRouteService 随机生成，经独立 proxy（默认 8124）按域名转发到容器
+  preview-scheme: ${CODE_PREVIEW_SCHEME:http}
+  preview-host-suffix: ${CODE_PREVIEW_HOST_SUFFIX:pv.localhost}
+  preview-port: ${CODE_PREVIEW_PORT:8124}
+  # 预览路由 TTL（小时）；Redis 比 DB 多留 1 小时
+  preview-ttl-hours: ${CODE_PREVIEW_TTL_HOURS:24}
+  # 部署地址形态：{scheme}://{deployKey}.{suffix}:{port}/
+  # deployKey 固定存在 app 表，重新部署/回滚都不换地址
+  deploy-scheme: ${CODE_DEPLOY_SCHEME:http}
+  deploy-host-suffix: ${CODE_DEPLOY_HOST_SUFFIX:app.localhost}
+  deploy-port: ${CODE_DEPLOY_PORT:8124}
+
+# 容器化部署（P5）：每个版本一个不可变镜像 + 一个容器，生产库与预览库拆开
+deploy:
+  enabled: ${DEPLOY_ENABLED:true}
+  # 基础镜像（本地已有 node:18-alpine，避免部署时临时拉取）
+  base-image: ${DEPLOY_BASE_IMAGE:node:18-alpine}
+  # 保留版本数（含当前版本）；更老的容器/镜像/快照会被清理
+  keep-versions: ${DEPLOY_KEEP_VERSIONS:5}
+  # docker build 超时（秒）
+  build-timeout-seconds: ${DEPLOY_BUILD_TIMEOUT_SECONDS:600}
+  # 容器启动后等待应用健康（含 migrate）的超时（秒）
+  health-timeout-seconds: ${DEPLOY_HEALTH_TIMEOUT_SECONDS:120}
+  memory: ${DEPLOY_MEMORY:512m}
+  cpus: ${DEPLOY_CPUS:1}
+
+# 预览生命周期：离开页面 / 长时间无改动时回收预览容器（部署容器不参与）
+preview:
+  lifecycle:
+    enabled: ${PREVIEW_LIFECYCLE_ENABLED:true}
+    # 扫描间隔（毫秒）
+    scan-interval-ms: ${PREVIEW_REAPER_INTERVAL_MS:30000}
+    # 离开页面多久后回收（秒）
+    leave-timeout-seconds: ${PREVIEW_LEAVE_TIMEOUT_SECONDS:120}
+    # 在页面上但多久没有改动后回收（秒）
+    idle-timeout-seconds: ${PREVIEW_IDLE_TIMEOUT_SECONDS:900}
+    # 前端心跳间隔（秒）
+    heartbeat-seconds: ${PREVIEW_HEARTBEAT_SECONDS:30}
+
+# 路由对账（P6）：容器重启/重建后宿主端口会变，定期把实际 upstream 写回 DB + Redis
+route:
+  reconcile:
+    enabled: ${ROUTE_RECONCILE_ENABLED:true}
+    # 扫描间隔（毫秒）；端口漂移最迟一个周期内自愈
+    interval-ms: ${ROUTE_RECONCILE_INTERVAL_MS:60000}
+    # 启动后延迟，避开应用启动阶段的 docker/DB 抖动
+    initial-delay-ms: ${ROUTE_RECONCILE_INITIAL_DELAY_MS:20000}
+
+# 平台模板（生成时写入项目目录：运行时 + 构建配置 + 前端骨架）
+platform:
+  template-dir: ${PLATFORM_TEMPLATE_DIR:${user.dir}/templates/node-unified}

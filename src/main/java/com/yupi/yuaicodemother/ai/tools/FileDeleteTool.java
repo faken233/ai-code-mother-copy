@@ -1,6 +1,7 @@
 package com.yupi.yuaicodemother.ai.tools;
 
 import cn.hutool.json.JSONObject;
+import com.yupi.yuaicodemother.template.AppTemplateService;
 import dev.langchain4j.agent.tool.P;
 import dev.langchain4j.agent.tool.Tool;
 import dev.langchain4j.agent.tool.ToolMemoryId;
@@ -26,6 +27,9 @@ public class FileDeleteTool extends BaseTool {
             String relativeFilePath,
             @ToolMemoryId Long appId
     ) {
+        if (AppTemplateService.isPlatformOwned(relativeFilePath)) {
+            return "❌ 该文件由平台维护，禁止删除：" + relativeFilePath;
+        }
         try {
             // 安全检查：避免删除重要文件
             String fileName = relativeFilePath != null ? java.nio.file.Paths.get(relativeFilePath).getFileName().toString() : "";

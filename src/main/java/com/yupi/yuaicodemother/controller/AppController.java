@@ -15,19 +15,22 @@ import com.yupi.yuaicodemother.exception.BusinessException;
 import com.yupi.yuaicodemother.exception.ErrorCode;
 import com.yupi.yuaicodemother.exception.ThrowUtils;
 import com.yupi.yuaicodemother.model.dto.app.*;
+import com.yupi.yuaicodemother.model.entity.AppAccessRoute;
 import com.yupi.yuaicodemother.model.entity.User;
 import com.yupi.yuaicodemother.model.enums.CodeGenTypeEnum;
 import com.yupi.yuaicodemother.model.vo.AppVO;
 import com.yupi.yuaicodemother.ratelimter.annotation.RateLimit;
 import com.yupi.yuaicodemother.ratelimter.enums.RateLimitType;
+import com.yupi.yuaicodemother.sandbox.PreviewLifecycleService;
 import com.yupi.yuaicodemother.sandbox.PreviewService;
+import com.yupi.yuaicodemother.service.AppDeployService;
+import com.yupi.yuaicodemother.service.AppRouteService;
 import com.yupi.yuaicodemother.service.ProjectDownloadService;
 import com.yupi.yuaicodemother.service.UserService;
 import jakarta.annotation.Resource;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.cache.annotation.Cacheable;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.MediaType;
 import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.web.bind.annotation.*;
@@ -38,6 +41,7 @@ import reactor.core.publisher.Mono;
 
 import java.io.File;
 import java.time.LocalDateTime;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -62,8 +66,14 @@ public class AppController {
     @Resource
     private PreviewService previewService;
 
-    @Value("${code.deploy-host:http://localhost}")
-    private String deployHost;
+    @Resource
+    private AppRouteService appRouteService;
+
+    @Resource
+    private AppDeployService appDeployService;
+
+    @Resource
+    private PreviewLifecycleService previewLifecycleService;
 
     /**
      * 全栈项目预览（沙箱内拉起后端）
@@ -81,15 +91,56 @@ public class AppController {
         if (!app.getUserId().equals(loginUser.getId())) {
             throw new BusinessException(ErrorCode.NO_AUTH_ERROR, "无权限预览该应用");
         }
-        // 仅支持全栈项目预览
-        ThrowUtils.throwIf(!CodeGenTypeEnum.FULLSTACK.getValue().equals(app.getCodeGenType()),
-                ErrorCode.PARAMS_ERROR, "仅全栈项目支持沙箱预览");
+        // 纯前端 / 带存储都跑在沙箱容器里，共用同一套预览链路
+        CodeGenTypeEnum genType = CodeGenTypeEnum.getEnumByValue(app.getCodeGenType());
+        ThrowUtils.throwIf(genType == null || !genType.isSandboxType(),
+                ErrorCode.PARAMS_ERROR, "该应用为旧格式，不支持预览，请重新生成");
         previewService.startPreview(appId);
-        // 预览地址：静态前端 + /api/** 反代均经 PreviewProxyController 处理（URL 带 appId，只存在于预览编排层）
-        // 用户下载源码后走 /（相对 api 路径），不经此控制器，零隔离痕迹
-        String previewUrl = String.format("%s/api/preview/%d/", deployHost, appId);
+        // 预览地址由路由服务给出：{code}.pv.localhost:{port}/ —— 由独立 proxy 按域名转发到容器。
+        // P6 已删除旧的 /api/preview/{appId}/ 兼容桥，浏览器只走域名入口。
+        String previewUrl = appRouteService.ensurePreviewRoute(appId);
         return ResultUtils.success(previewUrl);
     }
+    /**
+     * 预览心跳：前端在预览页可见时定期调用。
+     * <p>
+     * 返回当前预览状态，前端据此弹"已休眠"的提示：
+     * - READY  正常
+     * - SLEEPING 容器已被回收，需要点"恢复预览"
+     * - IDLE   还没有预览过
+     *
+     * @param appId 应用 ID
+     */
+    @PostMapping("/preview/{appId}/heartbeat")
+    public BaseResponse<Map<String, Object>> previewHeartbeat(@PathVariable Long appId, HttpServletRequest request) {
+        ThrowUtils.throwIf(appId == null || appId <= 0, ErrorCode.PARAMS_ERROR, "应用 ID 错误");
+        User loginUser = userService.getLoginUser(request);
+        App app = appService.getById(appId);
+        ThrowUtils.throwIf(app == null, ErrorCode.NOT_FOUND_ERROR, "应用不存在");
+        if (!app.getUserId().equals(loginUser.getId())) {
+            throw new BusinessException(ErrorCode.NO_AUTH_ERROR, "无权限访问该预览");
+        }
+
+        previewLifecycleService.touch(appId);
+
+        AppAccessRoute route = appRouteService.findPreviewRoute(appId);
+        String state;
+        if (route == null) {
+            state = "IDLE";
+        } else if (AppRouteService.STATUS_READY.equals(route.getStatus())) {
+            state = "READY";
+        } else {
+            state = "SLEEPING";
+        }
+
+        Map<String, Object> data = new HashMap<>();
+        data.put("state", state);
+        data.put("heartbeatSeconds", previewLifecycleService.getHeartbeatSeconds());
+        data.put("leaveTimeoutSeconds", previewLifecycleService.getLeaveTimeoutSeconds());
+        data.put("idleTimeoutSeconds", previewLifecycleService.getIdleTimeoutSeconds());
+        return ResultUtils.success(data);
+    }
+
     /**
      * 通过对话生成代码（SSE 流式返回）
      * <p>
@@ -156,6 +207,34 @@ public class AppController {
         String deployUrl = appService.deployApp(appId, loginUser);
         // 返回部署 URL
         return ResultUtils.success(deployUrl);
+    }
+
+    /**
+     * 回滚部署（P5）：把路由指回上一个版本，数据仍在同一个生产库。
+     *
+     * @param appId               应用 ID
+     * @param appRollbackRequest  可选：指定 version；为空回滚到上一版
+     * @param request             请求
+     * @return 部署 URL（地址不变）
+     */
+    @PostMapping("/deploy/{appId}/rollback")
+    public BaseResponse<String> rollbackDeploy(@PathVariable Long appId,
+                                               @RequestBody(required = false) AppRollbackRequest appRollbackRequest,
+                                               HttpServletRequest request) {
+        ThrowUtils.throwIf(appId == null || appId <= 0, ErrorCode.PARAMS_ERROR, "应用 ID 错误");
+        User loginUser = userService.getLoginUser(request);
+        Integer version = appRollbackRequest == null ? null : appRollbackRequest.getVersion();
+        return ResultUtils.success(appDeployService.rollback(appId, version, loginUser));
+    }
+
+    /**
+     * 部署信息（P5）：当前版本、可回滚版本、部署地址。
+     */
+    @GetMapping("/deploy/{appId}/info")
+    public BaseResponse<Map<String, Object>> deployInfo(@PathVariable Long appId, HttpServletRequest request) {
+        ThrowUtils.throwIf(appId == null || appId <= 0, ErrorCode.PARAMS_ERROR, "应用 ID 错误");
+        User loginUser = userService.getLoginUser(request);
+        return ResultUtils.success(appDeployService.deployInfo(appId, loginUser));
     }
 
     /**

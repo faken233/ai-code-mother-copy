@@ -1,6 +1,7 @@
 package com.yupi.yuaicodemother.ai.tools;
 
 import cn.hutool.core.io.FileUtil;
+import com.yupi.yuaicodemother.template.AppTemplateService;
 import cn.hutool.json.JSONObject;
 import dev.langchain4j.agent.tool.P;
 import dev.langchain4j.agent.tool.Tool;
@@ -29,6 +30,10 @@ public class FileWriteTool extends BaseTool {
             String content,
             @ToolMemoryId Long appId
     ) {
+        if (AppTemplateService.isPlatformOwned(relativeFilePath)) {
+            return "❌ 该文件由平台维护，禁止覆盖：" + relativeFilePath
+                    + "。你只需要写 schema.json、client/src/App.jsx（页面）以及可选的 routes/custom.js。";
+        }
         try {
             // 通过沙箱客户端写文件（沙箱开启走 HTTP，否则本地直写）
             sandboxClient.writeFile(relativeFilePath, content, appId);

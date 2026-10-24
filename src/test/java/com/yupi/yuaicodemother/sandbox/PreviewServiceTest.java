@@ -3,11 +3,8 @@ package com.yupi.yuaicodemother.sandbox;
 import com.yupi.yuaicodemother.exception.BusinessException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.io.TempDir;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
-
-import java.nio.file.Path;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
@@ -21,6 +18,9 @@ class PreviewServiceTest {
     @Mock
     private SandboxContainerManager sandboxContainerManager;
 
+    @Mock
+    private SandboxAppLauncher sandboxAppLauncher;
+
     private SandboxProperties sandboxProperties;
     private PreviewService previewService;
 
@@ -31,6 +31,7 @@ class PreviewServiceTest {
         previewService = new PreviewService();
         inject(previewService, "sandboxProperties", sandboxProperties);
         inject(previewService, "sandboxContainerManager", sandboxContainerManager);
+        inject(previewService, "sandboxAppLauncher", sandboxAppLauncher);
     }
 
     @Test
@@ -41,12 +42,21 @@ class PreviewServiceTest {
     }
 
     @Test
-    void startPreviewThrowsWhenBackendDirMissing(@TempDir Path tempDir) {
+    void startPreviewRejectsLegacyProject() {
         sandboxProperties.setEnabled(true);
-        // startPreview 先 ensureContainer（mock 不创建目录），随后检查后端目录不存在则抛异常
+        // P3 起旧格式（Vue + Spring Boot）不再支持预览：8081 映射已删除
+        when(sandboxAppLauncher.isUnifiedProject(1L)).thenReturn(false);
         BusinessException ex = assertThrows(BusinessException.class, () -> previewService.startPreview(1L));
-        verify(sandboxContainerManager, times(1)).ensureContainer(1L);
-        assertTrue(ex.getMessage().contains("后端目录不存在"), "实际: " + ex.getMessage());
+        assertTrue(ex.getMessage().contains("旧格式"), "实际: " + ex.getMessage());
+        verify(sandboxAppLauncher, never()).start(anyLong());
+    }
+
+    @Test
+    void startPreviewStartsUnifiedProject() {
+        sandboxProperties.setEnabled(true);
+        when(sandboxAppLauncher.isUnifiedProject(1L)).thenReturn(true);
+        previewService.startPreview(1L);
+        verify(sandboxAppLauncher, times(1)).start(1L);
     }
 
     @Test
@@ -56,7 +66,6 @@ class PreviewServiceTest {
         assertEquals(6380, sandboxProperties.getRedisPort(), "沙箱 Redis 端口应为 6380");
         assertEquals("host.docker.internal", sandboxProperties.getMysqlHost());
         assertEquals("host.docker.internal", sandboxProperties.getRedisHost());
-        assertEquals(8081, sandboxProperties.getContainerBackendPort());
     }
 
     private void inject(Object target, String fieldName, Object value) {

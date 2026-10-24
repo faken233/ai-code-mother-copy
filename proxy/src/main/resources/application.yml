@@ -1,0 +1,40 @@
+server:
+  port: ${PROXY_PORT:8124}
+
+spring:
+  application:
+    name: app-proxy
+  main:
+    banner-mode: off
+  # 与主服务共用同一个 Redis 实例（不同 key 前缀），路由由主服务写入
+  data:
+    redis:
+      host: ${REDIS_HOST:127.0.0.1}
+      port: ${REDIS_PORT:6379}
+      database: ${REDIS_DATABASE:0}
+      password: ${REDIS_PASSWORD:}
+      timeout: 800ms
+      connect-timeout: 1s
+
+proxy:
+  # 自检端点（/__health、/__selftest/stream），仅开发/验收用；上线前置为 false
+  selftest-enabled: ${PROXY_SELFTEST_ENABLED:true}
+  # 普通请求的上游读超时（秒）；SSE/长下载走不设超时的通道
+  normal-timeout-seconds: 30
+  # 静态别名路由：只服务于排障/验收，真实预览路由从 Redis 读
+  routes:
+    - host: echo.pv.localhost
+      app-id: 0
+      kind: PREVIEW
+      upstream: http://127.0.0.1:${PROXY_ECHO_PORT:18124}
+      status: READY
+    - host: dead.pv.localhost
+      app-id: 0
+      kind: PREVIEW
+      upstream: http://127.0.0.1:${PROXY_DEAD_PORT:1}
+      status: READY
+
+logging:
+  level:
+    root: info
+    com.yupi.proxy: info

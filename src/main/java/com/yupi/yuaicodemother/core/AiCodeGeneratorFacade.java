@@ -105,6 +105,11 @@ public class AiCodeGeneratorFacade {
                 TokenStream tokenStream = aiCodeGeneratorService.generateFullstackProjectCodeStream(appId, userMessage);
                 yield processTokenStream(tokenStream, appId);
             }
+            case STATIC -> {
+                log.info("【AI 请求】调用 STATIC（纯前端）代码生成，appId: {}", appId);
+                TokenStream tokenStream = aiCodeGeneratorService.generateStaticSiteCodeStream(appId, userMessage);
+                yield processTokenStream(tokenStream, appId);
+            }
             default -> {
                 String errorMessage = "不支持的生成类型：" + codeGenTypeEnum.getValue();
                 throw new BusinessException(ErrorCode.SYSTEM_ERROR, errorMessage);

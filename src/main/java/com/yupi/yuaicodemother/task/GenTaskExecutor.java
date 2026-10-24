@@ -6,6 +6,8 @@ import com.yupi.yuaicodemother.ai.model.message.StreamMessageTypeEnum;
 import com.yupi.yuaicodemother.core.AiCodeGeneratorFacade;
 import com.yupi.yuaicodemother.core.handler.StreamHandlerExecutor;
 import com.yupi.yuaicodemother.model.entity.App;
+import com.yupi.yuaicodemother.ai.tools.BuildProjectTool;
+import com.yupi.yuaicodemother.template.AppTemplateService;
 import com.yupi.yuaicodemother.model.entity.GenTask;
 import com.yupi.yuaicodemother.model.entity.User;
 import com.yupi.yuaicodemother.model.enums.ChatHistoryMessageTypeEnum;
@@ -18,6 +20,7 @@ import com.yupi.yuaicodemother.service.ChatHistoryService;
 import com.yupi.yuaicodemother.service.GenTaskService;
 import com.yupi.yuaicodemother.service.UserService;
 import com.yupi.yuaicodemother.sse.SseConnectionManager;
+import com.yupi.yuaicodemother.sandbox.PreviewLifecycleService;
 import com.yupi.yuaicodemother.sandbox.SandboxContainerManager;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
@@ -87,6 +90,18 @@ public class GenTaskExecutor {
 
     @Resource
     private SandboxContainerManager sandboxContainerManager;
+
+    @Resource
+    private PreviewLifecycleService previewLifecycleService;
+
+    @Resource
+    private com.yupi.yuaicodemother.sandbox.SandboxClient sandboxClient;
+
+    @Resource
+    private AppTemplateService appTemplateService;
+
+    @Resource
+    private BuildProjectTool buildProjectTool;
 
     /**
      * 调度线程池（用于轮询任务队列和清理超时任务）
@@ -199,13 +214,15 @@ public class GenTaskExecutor {
                     throw new RuntimeException("无效的代码生成类型");
                 }
 
-                // 全栈项目：先显式搭建沙箱（用户可见阶段：沙箱搭建中）
-                if (codeGenTypeEnum == CodeGenTypeEnum.FULLSTACK) {
+                // 沙箱项目（纯前端 / 带存储）：先显式搭建沙箱（用户可见阶段：沙箱搭建中）
+                if (codeGenTypeEnum.isSandboxType()) {
                     genTaskService.markTaskSandboxBuilding(taskId);
                     sseConnectionManager.sendTaskStatus(taskId, GenTaskStatusEnum.SANDBOX_BUILDING.getValue(), 0);
                     log.info("任务 {} 进入沙箱搭建阶段，开始搭建沙箱", taskId);
                     sandboxContainerManager.ensureContainer(appId);
-                    log.info("任务 {} 沙箱搭建完成，开始代码生成", taskId);
+                    // 写入平台固定文件（运行时/构建配置/前端骨架），AI 只能写 schema.json 与页面
+                    appTemplateService.install(appId);
+                    log.info("任务 {} 沙箱搭建完成，平台模板已安装，开始代码生成", taskId);
                 }
 
                 // 更新任务状态为运行中（代码生成中）
@@ -258,6 +275,33 @@ public class GenTaskExecutor {
                         genTaskService.appendGeneratedContent(taskId, contentBuilder.toString());
                     }
 
+                    // 平台兜底构建：AI 可能跳过 buildProject（实测会直接调 exit），
+                    // 这里统一跑一次校验 + 构建，避免"生成成功但 public/dist 不存在"
+                    if (codeGenTypeEnum.isSandboxType()) {
+                        try {
+                            String buildResult = buildProjectTool.buildProject(null, false, appId);
+                            if (buildResult != null && buildResult.contains("❌")) {
+                                log.error("平台兜底构建失败, taskId={}, result={}", taskId, buildResult);
+                                handleTaskError(taskId, new RuntimeException("平台构建校验未通过：\n" + buildResult));
+                                return;
+                            }
+                            log.info("平台兜底构建通过, taskId={}", taskId);
+                        } catch (Exception e) {
+                            log.error("平台兜底构建异常, taskId={}", taskId, e);
+                            handleTaskError(taskId, e);
+                            return;
+                        }
+                    }
+
+                    // 有新内容产出：重置预览的空闲计时，避免生成刚结束就被回收
+                    previewLifecycleService.markModified(appId);
+
+                    // 对话热更新：代码已落盘且构建通过，让运行中的应用重新加载
+                    // （前端产物已由平台构建，这里只做校验 + 重启，schema 新表在启动 migrate 时生效）
+                    if (codeGenTypeEnum.isSandboxType()) {
+                        sendPreviewReload(taskId, appId);
+                    }
+
                     // 更新任务状态为已完成
                     genTaskService.markTaskCompleted(taskId);
 
@@ -277,6 +321,39 @@ public class GenTaskExecutor {
                 return Mono.empty();
             }
         });
+    }
+
+    /**
+     * 对话热更新：让运行中的应用进程重新加载刚生成的代码，并通知前端重挂载 iframe。
+     * <p>
+     * 应用重启失败不把任务判死——代码本身已经构建通过，用户至少能看到上一次的可用版本；
+     * 失败原因随事件推给前端提示。
+     */
+    private void sendPreviewReload(Long taskId, Long appId) {
+        JSONObject payload = new JSONObject();
+        payload.set("appId", appId);
+        if (!sandboxClient.isEnabled()) {
+            payload.set("ok", true);
+            payload.set("skipped", true);
+            sseConnectionManager.sendEvent(taskId, "preview_reload", payload.toString());
+            return;
+        }
+        try {
+            JSONObject result = sandboxClient.rebuildApp(appId, false);
+            boolean ready = result != null && result.getBool("ready", false);
+            payload.set("ok", ready);
+            if (ready) {
+                log.info("预览热更新完成, taskId={}, appId={}", taskId, appId);
+            } else {
+                payload.set("message", "应用重启后未在 60 秒内就绪");
+                log.warn("预览热更新未就绪, taskId={}, appId={}", taskId, appId);
+            }
+        } catch (Exception e) {
+            payload.set("ok", false);
+            payload.set("message", e.getMessage());
+            log.warn("预览热更新失败, taskId={}, appId={}: {}", taskId, appId, e.getMessage());
+        }
+        sseConnectionManager.sendEvent(taskId, "preview_reload", payload.toString());
     }
 
     /**

@@ -2,16 +2,11 @@ package com.yupi.yuaicodemother.service.impl;
 
 import cn.hutool.core.bean.BeanUtil;
 import cn.hutool.core.collection.CollUtil;
-import cn.hutool.core.io.FileUtil;
-import cn.hutool.core.util.RandomUtil;
 import cn.hutool.core.util.StrUtil;
 import com.mybatisflex.core.query.QueryWrapper;
 import com.mybatisflex.spring.service.impl.ServiceImpl;
-import com.yupi.yuaicodemother.ai.AiCodeGenTypeRoutingService;
-import com.yupi.yuaicodemother.ai.AiCodeGenTypeRoutingServiceFactory;
-import com.yupi.yuaicodemother.constant.AppConstant;
+import com.yupi.yuaicodemother.ai.AppModeRouter;
 import com.yupi.yuaicodemother.core.AiCodeGeneratorFacade;
-import com.yupi.yuaicodemother.core.builder.VueProjectBuilder;
 import com.yupi.yuaicodemother.core.handler.StreamHandlerExecutor;
 import com.yupi.yuaicodemother.exception.BusinessException;
 import com.yupi.yuaicodemother.exception.ErrorCode;
@@ -27,24 +22,22 @@ import com.yupi.yuaicodemother.model.vo.AppVO;
 import com.yupi.yuaicodemother.model.vo.UserVO;
 import com.yupi.yuaicodemother.monitor.MonitorContext;
 import com.yupi.yuaicodemother.monitor.MonitorContextHolder;
+import com.yupi.yuaicodemother.service.AppCleanupService;
+import com.yupi.yuaicodemother.service.AppDeployService;
 import com.yupi.yuaicodemother.service.AppService;
 import com.yupi.yuaicodemother.service.ChatHistoryService;
 import com.yupi.yuaicodemother.service.ScreenshotService;
 import com.yupi.yuaicodemother.service.UserService;
 import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
 
-import java.io.File;
 import java.io.Serializable;
-import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 /**
@@ -55,9 +48,6 @@ import java.util.stream.Collectors;
 @Service
 @Slf4j
 public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppService {
-
-    @Value("${code.deploy-host:http://localhost}")
-    private String deployHost;
 
     @Resource
     private UserService userService;
@@ -72,13 +62,16 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
     private StreamHandlerExecutor streamHandlerExecutor;
 
     @Resource
-    private VueProjectBuilder vueProjectBuilder;
+    private AppDeployService appDeployService;
 
     @Resource
     private ScreenshotService screenshotService;
 
     @Resource
-    private AiCodeGenTypeRoutingServiceFactory aiCodeGenTypeRoutingServiceFactory;
+    private AppModeRouter appModeRouter;
+
+    @Resource
+    private AppCleanupService appCleanupService;
 
     @Override
     public Flux<String> chatToGenCode(Long appId, String message, User loginUser) {
@@ -128,18 +121,8 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
         app.setUserId(loginUser.getId());
         // 应用名称暂时为 initPrompt 前 12 位
         app.setAppName(initPrompt.substring(0, Math.min(initPrompt.length(), 12)));
-        // 使用 AI 智能选择代码生成类型（多例模式）
-        AiCodeGenTypeRoutingService aiCodeGenTypeRoutingService = aiCodeGenTypeRoutingServiceFactory.createAiCodeGenTypeRoutingService();
-        CodeGenTypeEnum selectedCodeGenType;
-        try {
-            selectedCodeGenType = aiCodeGenTypeRoutingService.routeCodeGenType(initPrompt);
-        } catch (Exception e) {
-            log.warn("AI 路由代码生成类型失败，回退到 VUE_PROJECT：{}", e.getMessage());
-            selectedCodeGenType = CodeGenTypeEnum.VUE_PROJECT;
-        }
-        if (selectedCodeGenType == null) {
-            selectedCodeGenType = CodeGenTypeEnum.VUE_PROJECT;
-        }
+        // 自动识别模式：关键词规则（不调模型，可解释、无额外延迟；详见 AppModeRouter）
+        CodeGenTypeEnum selectedCodeGenType = appModeRouter.route(initPrompt);
         app.setCodeGenType(selectedCodeGenType.getValue());
         // 插入数据库
         boolean result = this.save(app);
@@ -150,140 +133,12 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
 
     @Override
     public String deployApp(Long appId, User loginUser) {
-        // 1. 参数校验
-        ThrowUtils.throwIf(appId == null || appId <= 0, ErrorCode.PARAMS_ERROR, "应用 ID 错误");
-        ThrowUtils.throwIf(loginUser == null, ErrorCode.NOT_LOGIN_ERROR, "用户未登录");
-        // 2. 查询应用信息
-        App app = this.getById(appId);
-        ThrowUtils.throwIf(app == null, ErrorCode.NOT_FOUND_ERROR, "应用不存在");
-        // 3. 权限校验，仅本人可以部署自己的应用
-        if (!app.getUserId().equals(loginUser.getId())) {
-            throw new BusinessException(ErrorCode.NO_AUTH_ERROR, "无权限部署该应用");
-        }
-        // 4. 检查是否已有 deployKey
-        String deployKey = app.getDeployKey();
-        // 如果没有，则生成 6 位 deployKey（字母 + 数字）
-        if (StrUtil.isBlank(deployKey)) {
-            deployKey = RandomUtil.randomString(6);
-        }
-        // 5. 获取代码生成类型，获取原始代码生成路径（应用访问目录）
-        String codeGenType = app.getCodeGenType();
-        String sourceDirName = codeGenType + "_" + appId;
-        String sourceDirPath = AppConstant.CODE_OUTPUT_ROOT_DIR + File.separator + sourceDirName;
-        // 6. 检查路径是否存在
-        File sourceDir = new File(sourceDirPath);
-        if (!sourceDir.exists() || !sourceDir.isDirectory()) {
-            throw new BusinessException(ErrorCode.SYSTEM_ERROR, "应用代码路径不存在，请先生成应用");
-        }
-        // 7. Vue 项目特殊处理：执行构建
-        CodeGenTypeEnum codeGenTypeEnum = CodeGenTypeEnum.getEnumByValue(codeGenType);
-        if (codeGenTypeEnum == CodeGenTypeEnum.VUE_PROJECT) {
-            // Vue 项目需要构建
-            boolean buildSuccess = vueProjectBuilder.buildProject(sourceDirPath);
-            ThrowUtils.throwIf(!buildSuccess, ErrorCode.SYSTEM_ERROR, "Vue 项目构建失败，请重试");
-            // 检查 dist 目录是否存在
-            File distDir = new File(sourceDirPath, "dist");
-            ThrowUtils.throwIf(!distDir.exists(), ErrorCode.SYSTEM_ERROR, "Vue 项目构建完成但未生成 dist 目录");
-            // 构建完成后，需要将构建后的文件复制到部署目录
-            sourceDir = distDir;
-        } else if (codeGenTypeEnum == CodeGenTypeEnum.FULLSTACK) {
-            // 全栈项目：先构建前端（npm run build），再构建后端（mvn package）
-            File backendDir = new File(sourceDirPath, "backend");
-            File frontendDir = new File(sourceDirPath, "frontend");
-            ThrowUtils.throwIf(!backendDir.exists() || !frontendDir.exists(), ErrorCode.SYSTEM_ERROR, "全栈项目目录缺失");
-            // 构建后端：mvn package（产出 jar）
-            boolean backendBuild = buildBackendPackage(backendDir);
-            ThrowUtils.throwIf(!backendBuild, ErrorCode.SYSTEM_ERROR, "后端构建失败，请重试");
-            // 构建前端：npm run build（产出 dist）
-            boolean frontendBuild = vueProjectBuilder.buildProject(frontendDir.getPath());
-            ThrowUtils.throwIf(!frontendBuild, ErrorCode.SYSTEM_ERROR, "前端构建失败，请重试");
-            // 部署目录结构：frontend/dist/** 为静态托管根，backend/target/*.jar 单独子目录
-            File frontendDist = new File(frontendDir, "dist");
-            ThrowUtils.throwIf(!frontendDist.exists(), ErrorCode.SYSTEM_ERROR, "前端构建完成但未生成 dist 目录");
-            // 组装部署内容：先将前端 dist 复制到部署目录作为根，再把后端 jar 放到 backend/ 子目录
-            String deployDirPath = AppConstant.CODE_DEPLOY_ROOT_DIR + File.separator + deployKey;
-            File deployDir = new File(deployDirPath);
-            FileUtil.copyContent(frontendDist, deployDir, true);
-            File backendTarget = new File(backendDir, "target");
-            File jarFile = findFirstJar(backendTarget);
-            if (jarFile != null) {
-                File backendDeployDir = new File(deployDirPath, "backend");
-                backendDeployDir.mkdirs();
-                FileUtil.copy(jarFile, new File(backendDeployDir, jarFile.getName()), false);
-            }
-            // 8b. 更新数据库并返回 URL（静态托管根即前端入口）
-            App updateApp = new App();
-            updateApp.setId(appId);
-            updateApp.setDeployKey(deployKey);
-            updateApp.setDeployedTime(LocalDateTime.now());
-            boolean updateResult = this.updateById(updateApp);
-            ThrowUtils.throwIf(!updateResult, ErrorCode.OPERATION_ERROR, "更新应用部署信息失败");
-            String appDeployUrl = String.format("%s/%s/", deployHost, deployKey);
-            generateAppScreenshotAsync(appId, appDeployUrl);
-            return appDeployUrl;
-        }
-        // 8. 复制文件到部署目录
-        String deployDirPath = AppConstant.CODE_DEPLOY_ROOT_DIR + File.separator + deployKey;
-        try {
-            FileUtil.copyContent(sourceDir, new File(deployDirPath), true);
-        } catch (Exception e) {
-            throw new BusinessException(ErrorCode.SYSTEM_ERROR, "应用部署失败：" + e.getMessage());
-        }
-        // 9. 更新数据库
-        App updateApp = new App();
-        updateApp.setId(appId);
-        updateApp.setDeployKey(deployKey);
-        updateApp.setDeployedTime(LocalDateTime.now());
-        boolean updateResult = this.updateById(updateApp);
-        ThrowUtils.throwIf(!updateResult, ErrorCode.OPERATION_ERROR, "更新应用部署信息失败");
-        // 10. 构建应用访问 URL
-        String appDeployUrl = String.format("%s/%s/", deployHost, deployKey);        // 11. 异步生成截图并且更新应用封面
-        generateAppScreenshotAsync(appId, appDeployUrl);
-        return appDeployUrl;
-    }
-
-    /**
-     * 构建后端项目（mvn package），返回是否成功
-     */
-    private boolean buildBackendPackage(File backendDir) {
-        try {
-            log.info("开始构建后端: {}", backendDir.getPath());
-            Process process = new ProcessBuilder("mvn", "-q", "package", "-DskipTests")
-                    .directory(backendDir)
-                    .redirectErrorStream(true)
-                    .start();
-            boolean finished = process.waitFor(300, TimeUnit.SECONDS);
-            if (!finished) {
-                process.destroyForcibly();
-                log.error("后端构建超时: {}", backendDir.getPath());
-                return false;
-            }
-            int exitCode = process.exitValue();
-            if (exitCode == 0) {
-                log.info("后端构建成功: {}", backendDir.getPath());
-                return true;
-            }
-            log.error("后端构建失败，退出码: {}", exitCode);
-            return false;
-        } catch (Exception e) {
-            log.error("执行后端构建失败: {}", e.getMessage());
-            return false;
-        }
-    }
-
-    /**
-     * 在 target 目录下查找第一个可执行 jar
-     */
-    private File findFirstJar(File targetDir) {
-        if (targetDir == null || !targetDir.exists() || !targetDir.isDirectory()) {
-            return null;
-        }
-        File[] files = targetDir.listFiles((dir, name) -> name.endsWith(".jar") && !name.endsWith(".jar.original"));
-        if (files == null || files.length == 0) {
-            return null;
-        }
-        // 优先选择非 original 的 jar（可执行 jar）
-        return files[0];
+        // P5：容器化部署（快照 → 生产镜像 → 版本容器 → 原子切路由 → 停旧版）
+        // 具体流程见 AppDeployService；部署失败会回滚到旧版本，不会影响线上。
+        String deployUrl = appDeployService.deploy(appId, loginUser);
+        // 部署成功后异步刷新封面（失败不影响部署结果）
+        generateAppScreenshotAsync(appId, deployUrl);
+        return deployUrl;
     }
 
     /**
@@ -385,13 +240,21 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
         if (appId <= 0) {
             return false;
         }
+        // 先记下类型/部署标识：逻辑删除后 getById 查不到，目录/库/域名都靠这个快照
+        App app = this.getById(appId);
+        String codeGenType = app == null ? null : app.getCodeGenType();
+        String deployKey = app == null ? null : app.getDeployKey();
         // 先删除关联的对话历史
         try {
             chatHistoryService.deleteByAppId(appId);
         } catch (Exception e) {
             log.error("删除应用关联的对话历史失败：{}", e.getMessage());
         }
-        // 删除应用
-        return super.removeById(id);
+        boolean removed = super.removeById(id);
+        if (removed) {
+            // P6：容器 / 路由 / 代码目录 / 预览库 / 生产库一并回收（每步 best-effort）
+            appCleanupService.cleanupAfterDelete(appId, codeGenType, deployKey);
+        }
+        return removed;
     }
 }
